@@ -62,21 +62,18 @@ public class CouponGenerateService {
         }
         JsonNode node = result.get(0);
 
-        String code = text(node, "skd_code");
-        if (code == null) throw new InvalidRequestException("Portal tidak mengembalikan skd_code");
-
-        // Kode yang sudah pernah di-tag TIDAK boleh diterbitkan ulang.
-        // Kalau portal masih mengembalikan kode lama, berarti belum ada kode baru
-        // (mis. kuota campaign habis) → tolak, jangan bagikan ulang.
-        if (generatedRepo.existsByCouponCode(code)) {
-            log.info("Kode {} sudah pernah di-tag → tolak (belum ada kode baru dari portal)", code);
-            throw new CouponExhaustedException(req.couponId(), code);
+        // Kode kupon = `skd` dari salah satu skd_line yang BELUM dipakai DAN belum kita tag.
+        // skd_code (top-level) BUKAN kode kupon — hanya penanda.
+        JsonNode line = pickAvailableLine(node);
+        if (line == null) {
+            log.info("Semua skd untuk coupon {} sudah dipakai/ter-tag → habis", req.couponId());
+            throw new CouponExhaustedException(req.couponId(), "all");
         }
+        String code = text(line, "skd");
 
         String termsText = text(node, "terms_text");
-        JsonNode line = findSkdLine(node, code);
-        boolean isUsed = line != null && line.path("is_used").asBoolean(false);
-        String state = line != null ? text(line, "state") : null;
+        boolean isUsed = line.path("is_used").asBoolean(false);
+        String state = text(line, "state");
 
         String tag = (req.tag() != null && !req.tag().isBlank())
                 ? req.tag()
@@ -124,12 +121,19 @@ public class CouponGenerateService {
             throw new InvalidRequestException("couponId wajib diisi");
     }
 
-    private JsonNode findSkdLine(JsonNode node, String code) {
+    /**
+     * Pilih skd_line pertama yang BELUM dipakai (is_used = false) dan kodenya
+     * BELUM pernah kita tag di DB. Mengembalikan null bila semua sudah terpakai/ter-tag.
+     */
+    private JsonNode pickAvailableLine(JsonNode node) {
         for (JsonNode line : node.path("skd_line")) {
-            if (code.equals(text(line, "skd"))) return line;
+            if (line.path("is_used").asBoolean(false)) continue;     // sudah dipakai
+            String skd = text(line, "skd");
+            if (skd == null) continue;
+            if (generatedRepo.existsByCouponCode(skd)) continue;     // sudah kita tag
+            return line;
         }
-        JsonNode lines = node.path("skd_line");
-        return lines.isArray() && !lines.isEmpty() ? lines.get(0) : null;
+        return null;
     }
 
     private String text(JsonNode n, String f) {
