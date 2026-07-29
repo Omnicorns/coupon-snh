@@ -62,7 +62,7 @@ public class GeneratedCoupon {
     @Column(nullable = false)
     private CouponStatus status;
 
-    @Lob
+
     @Column(columnDefinition = "TEXT")
     private String rawJson;
 
