@@ -3,11 +3,13 @@ package com.sarinah.coupon.service;
 import com.sarinah.coupon.dto.GenerateCouponByCouponResponse;
 import com.sarinah.coupon.dto.GenerateCouponResponse;
 import com.sarinah.coupon.entity.GeneratedCoupon;
+import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 
+@Component
 public class GenerateCouponCodeMapper {
     private static final ZoneId JKT = ZoneId.of("Asia/Jakarta");
 
