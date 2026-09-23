@@ -1,5 +1,6 @@
 package com.sarinah.coupon.controller;
 
+import com.sarinah.coupon.dto.GenerateCouponNewResponse;
 import com.sarinah.coupon.dto.GenerateCouponRequest;
 import com.sarinah.coupon.dto.GenerateCouponResponse;
 import com.sarinah.coupon.repository.GeneratedCouponRepository;
@@ -42,7 +43,7 @@ public class CouponGenerateController {
     }
 
     @GetMapping("/{id}")
-    public List<GenerateCouponResponse> getById(@PathVariable Long id) {
+    public List<GenerateCouponNewResponse> getById(@PathVariable Long id) {
         return getCouponByIdService.getCouponById(id);
     }
 
