@@ -79,7 +79,7 @@ public class GetCouponIsUsedService {
                     if (line == null) {
                         log.warn("Sync: code={} tidak ada di skd_line portal (sku={}) → EXPIRED",
                                 c.getCouponCode(), sku);
-                        c.setStatus(CouponStatus.EXPIRED);
+                        c.setStatus(CouponStatus.REVOKED);
                         generatedCouponRepository.save(c);
                         updated++;
                         continue;
