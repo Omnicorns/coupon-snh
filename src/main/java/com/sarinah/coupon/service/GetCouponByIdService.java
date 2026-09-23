@@ -1,7 +1,8 @@
 package com.sarinah.coupon.service;
 
+import com.sarinah.coupon.dto.GenerateCouponNewResponse;
 import com.sarinah.coupon.dto.GenerateCouponResponse;
-import com.sarinah.coupon.entity.GeneratedCoupon;
+
 import com.sarinah.coupon.exception.CouponNotFoundException;
 import com.sarinah.coupon.repository.GeneratedCouponRepository;
 import lombok.RequiredArgsConstructor;
@@ -13,10 +14,10 @@ import java.util.List;
 @RequiredArgsConstructor
 public class GetCouponByIdService {
     private final GeneratedCouponRepository generatedCouponRepository;
-    private final GeneratedCouponMapper transformer;
+    private final GeneratedCouponNewMapper transformer;
 
 
-    public List<GenerateCouponResponse> getCouponById(Long id) {
+    public List<GenerateCouponNewResponse> getCouponById(Long id) {
         var coupon = generatedCouponRepository.findByCouponId(id)
                 .stream().map(transformer::toResponse).toList();
         if (coupon.isEmpty()){
