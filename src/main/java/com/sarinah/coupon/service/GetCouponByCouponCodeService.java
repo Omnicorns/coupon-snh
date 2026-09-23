@@ -9,7 +9,7 @@ import org.springframework.stereotype.Service;
 @RequiredArgsConstructor
 public class GetCouponByCouponCodeService {
     private final GeneratedCouponRepository generatedCouponRepository;
-    private final GenerateCouponCodeMapper  transformer;
+    private final GenerateCouponCodeMapper transformer;
 
 
     public GenerateCouponByCouponResponse getByCouponCode(String couponCode) {

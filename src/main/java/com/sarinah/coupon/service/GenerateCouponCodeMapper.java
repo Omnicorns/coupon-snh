@@ -16,8 +16,8 @@ public class GenerateCouponCodeMapper {
     public GenerateCouponByCouponResponse toResponse(GeneratedCoupon c) {
 
         return new GenerateCouponByCouponResponse(
-                c.getTransactionId(),
                 c.getCouponCode(),
+                c.getCouponName(),
                 c.getStatus(),
                 c.getIsUsed(),
                 c.getRedeemDate() == null ? null : c.getRedeemDate().toString()
