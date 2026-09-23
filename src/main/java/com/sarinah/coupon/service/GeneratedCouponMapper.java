@@ -14,7 +14,9 @@ public class GeneratedCouponMapper {
     private static final ZoneId JKT = ZoneId.of("Asia/Jakarta");
 
     public GenerateCouponResponse toResponse(GeneratedCoupon c) {
+
         return new GenerateCouponResponse(
+                c.getId(),
                 c.getTransactionId(),
                 c.getCouponCode(),
                 c.getCouponName(),

@@ -5,6 +5,7 @@ import com.sarinah.coupon.dto.GenerateCouponResponse;
 import com.sarinah.coupon.repository.GeneratedCouponRepository;
 import com.sarinah.coupon.service.CouponGenerateService;
 import com.sarinah.coupon.service.GeneratedCouponMapper;
+import com.sarinah.coupon.service.GetCouponByIdService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
@@ -22,6 +23,7 @@ public class CouponGenerateController {
     private final CouponGenerateService generateService;
     private final GeneratedCouponRepository generatedRepo;
     private final GeneratedCouponMapper mapper;
+    private final GetCouponByIdService getCouponByIdService;
 
     @PostMapping("/generate")
     public GenerateCouponResponse generate(@RequestBody GenerateCouponRequest request) {
@@ -38,4 +40,11 @@ public class CouponGenerateController {
 
         return data.stream().map(mapper::toResponse).toList();
     }
+
+    @GetMapping("/{id}")
+    public GenerateCouponResponse getById(@PathVariable Long id) {
+        return getCouponByIdService.getCouponById(id);
+    }
+
+
 }
