@@ -1,7 +1,6 @@
 package com.sarinah.coupon.dto;
 
 public record GenerateCouponResponse(
-        Long generateCouponId,
         String transactionId,
         String couponCode,
         String couponName,

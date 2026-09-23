@@ -1,33 +1,29 @@
 package com.sarinah.coupon.service;
 
 import com.sarinah.coupon.dto.GenerateCouponResponse;
+import com.sarinah.coupon.entity.GeneratedCoupon;
+import com.sarinah.coupon.exception.CouponNotFoundException;
 import com.sarinah.coupon.repository.GeneratedCouponRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+
+import java.util.List;
 
 @Service
 @RequiredArgsConstructor
 public class GetCouponByIdService {
     private final GeneratedCouponRepository generatedCouponRepository;
+    private final GeneratedCouponMapper transformer;
 
 
+    public List<GenerateCouponResponse> getCouponById(Long id) {
+        var coupon = generatedCouponRepository.findByCouponId(id)
+                .stream().map(transformer::toResponse).toList();
+        if (coupon.isEmpty()){
+            throw  new CouponNotFoundException(id);
+        }
 
-    public GenerateCouponResponse getCouponById(Long id) {
-        var coupon = generatedCouponRepository.findById(id)
-                .orElseThrow(() -> new RuntimeException("Coupon not found"));
 
-        return new GenerateCouponResponse(
-                coupon.getCouponId(),
-                coupon.getTransactionId(),
-                coupon.getCouponCode(),
-                coupon.getCouponName(),
-                coupon.getDiscPercentage(),
-                coupon.getScanType(),
-                coupon.getStartDate() == null ? null : coupon.getStartDate().toString(),
-                coupon.getEndDate() == null ? null : coupon.getEndDate().toString(),
-                coupon.getRedeemDate() == null ? null : coupon.getRedeemDate().toString(),
-                coupon.getTermsText(),
-                coupon.getCreatedAt() == null ? null : coupon.getCreatedAt().toString()
-        );
+        return coupon;
     }
 }

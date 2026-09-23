@@ -42,7 +42,7 @@ public class CouponGenerateController {
     }
 
     @GetMapping("/{id}")
-    public GenerateCouponResponse getById(@PathVariable Long id) {
+    public List<GenerateCouponResponse> getById(@PathVariable Long id) {
         return getCouponByIdService.getCouponById(id);
     }
 

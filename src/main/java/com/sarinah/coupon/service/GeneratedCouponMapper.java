@@ -16,7 +16,6 @@ public class GeneratedCouponMapper {
     public GenerateCouponResponse toResponse(GeneratedCoupon c) {
 
         return new GenerateCouponResponse(
-                c.getId(),
                 c.getTransactionId(),
                 c.getCouponCode(),
                 c.getCouponName(),

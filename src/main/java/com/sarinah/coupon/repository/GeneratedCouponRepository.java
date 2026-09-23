@@ -15,6 +15,7 @@ public interface GeneratedCouponRepository extends JpaRepository<GeneratedCoupon
     Optional<GeneratedCoupon> findByCouponCode(String couponCode);
 
     List<GeneratedCoupon> findByIsUsedFalse();
+    List<GeneratedCoupon> findByCouponId(Long couponId);
 
     List<GeneratedCoupon> findByTagAndIsUsedFalse(String tag);
     boolean existsByCouponCode(String couponCode);
