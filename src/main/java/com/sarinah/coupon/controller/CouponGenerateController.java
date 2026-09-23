@@ -50,7 +50,7 @@ public class CouponGenerateController {
         return getCouponByIdService.getCouponById(id);
     }
 
-    @GetMapping("/{code}")
+    @GetMapping("/code/{code}")
     public GenerateCouponByCouponResponse getByCode(@PathVariable String code) {
         return getCouponByCouponCodeService.getByCouponCode(code);
     }
