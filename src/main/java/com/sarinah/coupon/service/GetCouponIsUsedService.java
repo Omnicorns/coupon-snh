@@ -6,13 +6,14 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import com.sarinah.coupon.dto.SyncIsUsedResponse;
+import com.sarinah.coupon.entity.CouponStatus;
 import com.sarinah.coupon.entity.GeneratedCoupon;
 import com.sarinah.coupon.repository.GeneratedCouponRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
-import java.time.Instant;
+
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -70,26 +71,44 @@ public class GetCouponIsUsedService {
                 }
 
                 // 4) cocokkan tiap kupon kita dengan line portal-nya
+                // 4) cocokkan tiap kupon kita dengan line portal-nya
                 for (GeneratedCoupon c : entry.getValue()) {
                     JsonNode line = lineBySkd.get(c.getCouponCode());
+
+                    // Aturan 3: skd tidak ada lagi di skd_line portal → EXPIRED
                     if (line == null) {
-                        log.warn("Sync is_used: code={} tidak ditemukan di skd_line portal (sku={})",
+                        log.warn("Sync: code={} tidak ada di skd_line portal (sku={}) → EXPIRED",
                                 c.getCouponCode(), sku);
+                        c.setStatus(CouponStatus.EXPIRED);
+                        generatedCouponRepository.save(c);
+                        updated++;
                         continue;
                     }
 
                     boolean portalUsed = line.path("is_used").asBoolean(false);
-                    if (!portalUsed) continue; // portal juga belum used -> biarkan
-                    c.setIsUsed(true);
-                    c.setState(textOrDefault(line, "state", "used"));
-                    c.setRedeemDate(LocalDateTime.from(parseRedeemDate(textOrNull(line, "write_date"))));
-                    generatedCouponRepository.save(c);
-                    updated++;
 
-                    log.info("Sync is_used: code={} -> USED (order={}, write_date={})",
-                            c.getCouponCode(),
-                            textOrNull(line, "order_id_char"),
-                            textOrNull(line, "write_date"));
+                    if (portalUsed) {
+                        // Aturan 1: sudah dipakai → REDEEMED (menang atas expired)
+                        c.setIsUsed(true);
+                        c.setState(textOrDefault(line, "state", "used"));
+                        c.setRedeemDate(parseRedeemDate(textOrNull(line, "write_date")));
+                        c.setStatus(CouponStatus.REDEEMED);
+                        generatedCouponRepository.save(c);
+                        updated++;
+
+                        log.info("Sync: code={} → REDEEMED (write_date={})",
+                                c.getCouponCode(), textOrNull(line, "write_date"));
+
+                    } else if (isExpired(c)) {
+                        // Aturan 2: belum dipakai tapi tanggal lewat end → EXPIRED
+                        c.setStatus(CouponStatus.EXPIRED);
+                        generatedCouponRepository.save(c);
+                        updated++;
+
+                        log.info("Sync: code={} → EXPIRED (endDate={})", c.getCouponCode(), c.getEndDate());
+                    }
+                    // selain itu: masih ACTIVE, biarkan
+
                 }
             } catch (Exception e) {
                 log.error("Sync is_used gagal untuk sku={}: {}", sku, e.getMessage());
@@ -125,10 +144,9 @@ public class GetCouponIsUsedService {
         return v != null ? v : def;
     }
 
-
-
-
-
+    private boolean isExpired(GeneratedCoupon c) {
+        return c.getEndDate() != null && c.getEndDate().isBefore(LocalDateTime.now(ZONE));
+    }
 
 
 
