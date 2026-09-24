@@ -20,7 +20,7 @@ public class GenerateCouponCodeMapper {
                 c.getCouponName(),
                 c.getStatus(),
                 c.getIsUsed(),
-                c.getRedeemDate() == null ? null : c.getRedeemDate().toString()
+                toIso(c.getRedeemDate())
 
 
         );
