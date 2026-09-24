@@ -33,6 +33,9 @@ public class SarinahGetModulAdaptor {
     @Value("${sarinah-portal.coupon.url}")
     private String couponUrl;
 
+    @Value("${sarinah-portal.coupon.order.url}")
+    private String posOrderUrl;
+
     private final CommonUtils commonUtils;
     private final RestClient defaultPointRestClient;
 
@@ -66,5 +69,31 @@ public class SarinahGetModulAdaptor {
         ArrayNode arr = JsonNodeFactory.instance.arrayNode();
         arr.add(root);
         return arr;
+    }
+
+    public ArrayNode getPosHistory(ObjectNode request) {
+        JsonNode root = defaultPointRestClient
+                .post()
+                .uri(commonUtils.dynamicParamBuilder(request,posOrderUrl))
+                .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_FORM_URLENCODED_VALUE)
+                .accept(MediaType.APPLICATION_JSON)
+                .retrieve()
+                .body(JsonNode.class);;                 // baca sebagai JsonNode
+
+
+        if (root == null) {
+            return JsonNodeFactory.instance.arrayNode();
+        }
+
+
+        if (root.isArray()) {
+            return (ArrayNode) root;
+        }
+
+
+        ArrayNode arr = JsonNodeFactory.instance.arrayNode();
+        arr.add(root);
+        return arr;
+
     }
 }

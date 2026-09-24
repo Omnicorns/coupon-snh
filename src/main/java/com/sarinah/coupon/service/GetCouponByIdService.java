@@ -1,7 +1,6 @@
 package com.sarinah.coupon.service;
 
 import com.sarinah.coupon.dto.GenerateCouponNewResponse;
-import com.sarinah.coupon.dto.GenerateCouponResponse;
 
 import com.sarinah.coupon.exception.CouponNotFoundException;
 import com.sarinah.coupon.repository.GeneratedCouponRepository;

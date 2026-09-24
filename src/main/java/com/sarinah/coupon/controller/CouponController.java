@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.sarinah.coupon.dto.CouponResponse;
 import com.sarinah.coupon.service.CouponQueryService;
 import com.sarinah.coupon.service.CouponSyncService;
+import com.sarinah.coupon.service.GetCouponIsUsedService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
@@ -20,6 +21,7 @@ public class CouponController {
 
     private final CouponQueryService queryService;
     private final CouponSyncService syncService;
+
 
     @GetMapping
     public List<CouponResponse> list() {
@@ -40,6 +42,9 @@ public class CouponController {
     public CouponResponse detail(@PathVariable Long id) {
         return queryService.getById(id);
     }
+
+
+
 
     /**
      * Pemicu sync manual untuk keperluan operasional/testing.
