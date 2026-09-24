@@ -122,7 +122,7 @@ public class GetCouponIsUsedService {
         if (line == null) {
             if (c.getStatus() == CouponStatus.REVOKED) return false;   // sudah dikirim sebelumnya
             c.setStatus(CouponStatus.REVOKED);
-            webhookPublisher.saveAndPublish(c, WebhookEventType.REVOKED, tpl.id(), LocalDateTime.now(ZONE));
+            webhookPublisher.saveAndPublish(c, WebhookEventType.REVOKED, tpl.id(), null);
             log.warn("Sync: code={} tidak ada di skd_line portal (sku={}) -> REVOKED", c.getCouponCode(), tpl.sku());
             return true;
         }
@@ -152,7 +152,7 @@ public class GetCouponIsUsedService {
         if (isExpired(c)) {
             if (c.getStatus() == CouponStatus.EXPIRED) return false;   // sudah dikirim sebelumnya
             c.setStatus(CouponStatus.EXPIRED);
-            webhookPublisher.saveAndPublish(c, WebhookEventType.EXPIRED, tpl.id(), c.getEndDate());
+            webhookPublisher.saveAndPublish(c, WebhookEventType.EXPIRED, tpl.id(),null);
             log.info("Sync: code={} -> EXPIRED (endDate={})", c.getCouponCode(), c.getEndDate());
             return true;
         }
