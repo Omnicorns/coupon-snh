@@ -1,5 +1,6 @@
 package com.sarinah.coupon.adaptor;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -14,6 +15,8 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 /**
  * Outbound adapter ke portal Sarinah.
@@ -38,6 +41,7 @@ public class SarinahGetModulAdaptor {
 
     private final CommonUtils commonUtils;
     private final RestClient defaultPointRestClient;
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @SneakyThrows
     public ArrayNode getCoupon(ObjectNode request) {
@@ -72,28 +76,35 @@ public class SarinahGetModulAdaptor {
     }
 
     public ArrayNode getPosHistory(ObjectNode request) {
-        JsonNode root = defaultPointRestClient
+        String raw = defaultPointRestClient
                 .post()
-                .uri(commonUtils.dynamicParamBuilder(request,posOrderUrl))
+                .uri(commonUtils.dynamicParamBuilder(request, posOrderUrl))
                 .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_FORM_URLENCODED_VALUE)
                 .accept(MediaType.APPLICATION_JSON)
                 .retrieve()
-                .body(JsonNode.class);;                 // baca sebagai JsonNode
+                .body(String.class);                 // baca sebagai String, bukan JsonNode
 
-
-        if (root == null) {
+        if (raw == null || raw.isBlank()) {
             return JsonNodeFactory.instance.arrayNode();
         }
 
+        JsonNode root;
+        try {
+            root = MAPPER.readTree(raw);             // parse dengan Jackson 2
+        } catch (JsonProcessingException e) {
+            // mis. halaman HTML WAF / error portal, bukan JSON
+            throw new IllegalStateException("Response order history bukan JSON: "
+                    + raw.substring(0, Math.min(raw.length(), 200)), e);
+        }
 
+        if (root == null || root.isNull() || root.isMissingNode()) {
+            return JsonNodeFactory.instance.arrayNode();
+        }
         if (root.isArray()) {
             return (ArrayNode) root;
         }
-
-
         ArrayNode arr = JsonNodeFactory.instance.arrayNode();
         arr.add(root);
         return arr;
-
     }
 }
