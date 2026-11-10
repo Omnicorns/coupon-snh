@@ -33,6 +33,11 @@ public class GlobalExceptionHandler {
         return build(HttpStatus.CONFLICT, e.getMessage());
     }
 
+    @ExceptionHandler(IdempotencyKeyReusedException.class)
+    public ResponseEntity<Map<String, Object>> idempotencyReused(IdempotencyKeyReusedException e) {
+        return build(HttpStatus.valueOf(422), e.getMessage());
+    }
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<Map<String, Object>> generic(Exception e) {
         log.error("Unhandled error", e);
