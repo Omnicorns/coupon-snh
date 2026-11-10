@@ -57,3 +57,59 @@ Contoh response:
   "termsText": "tunjukkan kode coupon"
 }
 ```
+
+---
+
+## Perbaikan: idempotency generate untuk request bersamaan
+
+Sebelumnya `generate()` memeriksa `findByIdempotencyKey`, memanggil portal, lalu menyimpan.
+Dua request dengan key sama yang datang hampir bersamaan bisa sama-sama lolos pemeriksaan
+dan sama-sama memanggil portal sebelum salah satunya ditolak unique constraint.
+
+Sekarang:
+- **Tabel klaim baru `coupon_generate_requests`** (PK = `idempotency_key`), dibuat otomatis oleh
+  `ddl-auto=update`. Kolom: `request_hash`, `status` (`PROCESSING`/`COMPLETED`/`FAILED`),
+  `claim_token`, `locked_until`, `generated_coupon_id`, `attempts`, `last_error`.
+- **Klaim atomik sebelum portal**: `INSERT ... ON CONFLICT DO NOTHING` di transaksi sendiri yang
+  langsung di-commit. Hanya satu request yang memegang klaim dan memanggil portal.
+- **Request lain dengan key sama**:
+  - klaim `COMPLETED` → kembalikan kupon yang sama (tanpa memanggil portal);
+  - klaim `PROCESSING` dan lease masih berlaku → `409`, client mengulang;
+  - klaim `FAILED` atau lease habis → diambil alih secara atomik (`UPDATE ... WHERE`).
+- **Simpan hasil secara idempotent**: insert kupon + ubah klaim ke `COMPLETED` dalam satu transaksi,
+  dan `COMPLETED` hanya berhasil bila `claim_token` masih milik kita (mencegah pemilik lama yang
+  lease-nya habis ikut menyimpan).
+- **Gagal sebelum tersimpan** (portal error, kupon habis, kode skd bentrok) → klaim dilepas sebagai
+  `FAILED`, sehingga retry dengan key yang sama bisa mencoba lagi.
+- **Key dipakai ulang untuk isi berbeda** (couponId/transactionId/tag lain) → `422`.
+- `generate()` tidak lagi `@Transactional` penuh: koneksi DB tidak ditahan selama panggilan portal
+  (read-timeout bisa 60 detik).
+- Kupon lama (sebelum tabel klaim ada) tetap dikenali: bila key sudah punya kupon, klaim langsung
+  ditandai `COMPLETED` dan kupon lama dikembalikan.
+- Konfigurasi: `coupon.generate.processing-lease=PT2M` (harus > total timeout portal).
+
+---
+
+## Perbaikan: dispatcher webhook aman untuk multi-instance
+
+Sebelumnya `WebhookOutboxDispatcher` membaca event PENDING lalu mengirimnya tanpa lock, sehingga
+beberapa instance bisa mengirim event yang sama ke PRIME.
+
+Sekarang:
+- Kolom baru `locked_by` dan `locked_until` di `prime_webhook_outbox` (ditambah otomatis oleh
+  `ddl-auto=update`, nullable).
+- Tiap putaran mengklaim batch secara atomik:
+  `UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED LIMIT n)`. Instance lain langsung
+  mengambil event berikutnya tanpa menunggu, dan satu event hanya dipegang satu instance.
+- Lease = `batchSize × (connectTimeout + readTimeout) + 1 menit`; putaran berhenti memulai
+  kiriman baru bila lease hampir habis, lalu melepas sisanya.
+- Hasil percobaan disimpan dengan `UPDATE ... WHERE id = ? AND locked_by = ?`, sehingga putaran yang
+  lock-nya sudah lepas tidak menimpa hasil instance lain.
+- Tidak menambah dependency (ShedLock tidak diperlukan) dan tetap paralel antar-instance.
+
+## Perbaikan: GET /api/v1/coupon/code/{code} dengan kode nonnumerik
+
+Saat kupon tidak ditemukan, `GetCouponByCouponCodeService` memanggil `Long.valueOf(couponCode)`
+untuk pesan error → `NumberFormatException` → HTTP 500 bila kode berisi huruf. Sekarang memakai
+konstruktor `CouponNotFoundException(String)` → HTTP 404 untuk semua bentuk kode, dan kode kosong
+→ HTTP 400.

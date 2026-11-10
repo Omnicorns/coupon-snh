@@ -19,13 +19,14 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Instant;
 
 /**
  * Menerbitkan kode kupon (= skd dari portal) untuk sebuah coupon sumber.
- * idempotencyKey memastikan retry tidak mencetak kode ganda.
+ * idempotencyKey diklaim secara atomik (tabel coupon_generate_requests) sehingga retry maupun
+ * request bersamaan dengan key yang sama tidak memanggil portal / mencetak kode ganda.
  */
 @Slf4j
 @Service
@@ -36,18 +37,70 @@ public class CouponGenerateService {
     private final CouponRepository couponRepo;
     private final PostCouponListService postCouponListService;
     private final GeneratedCouponMapper mapper;
+    private final GenerateIdempotencyService idempotency;
+    private final TransactionTemplate tx;
 
-    @Transactional
+    /**
+     * Alur idempotency:
+     * 1) Klaim key secara atomik (commit sebelum portal dipanggil) → hanya satu request yang lanjut.
+     * 2) Pemilik klaim memanggil portal, lalu menyimpan kupon + menandai klaim COMPLETED dalam
+     *    SATU transaksi.
+     * 3) Bila gagal sebelum tersimpan, klaim dilepas sebagai FAILED sehingga retry dengan key
+     *    yang sama bisa mencoba lagi. Request yang datang saat klaim masih PROCESSING mendapat 409.
+     *
+     * Method ini sengaja TIDAK @Transactional: koneksi DB tidak ditahan selama panggilan portal.
+     */
     public GenerateCouponResponse generate(GenerateCouponRequest req) {
         validate(req);
+        String key = req.idempotencyKey();
 
-        // 1) Idempotensi — retry tidak memanggil portal lagi
-        var existing = generatedRepo.findByIdempotencyKey(req.idempotencyKey());
-        if (existing.isPresent()) {
-            log.info("Idempotent hit key={}", req.idempotencyKey());
-            return mapper.toResponse(existing.get());
+        // 1) Klaim atomik
+        GenerateIdempotencyService.Claim claim = idempotency.acquire(req);
+        if (!claim.owned()) {
+            return generatedRepo.findById(claim.completedCouponId())
+                    .map(mapper::toResponse)
+                    .orElseThrow(() -> new IllegalStateException(
+                            "Klaim COMPLETED tanpa kupon, key=" + key));
         }
+        String token = claim.token();
 
+        try {
+            // Data lama (sebelum tabel klaim ada) mungkin sudah punya kupon dengan key ini.
+            var legacy = generatedRepo.findByIdempotencyKey(key);
+            if (legacy.isPresent()) {
+                tx.executeWithoutResult(s -> idempotency.complete(key, token, legacy.get().getId()));
+                log.info("Idempotent hit (data lama) key={}", key);
+                return mapper.toResponse(legacy.get());
+            }
+
+            GeneratedCoupon coupon = issue(req);
+
+            // 4) Simpan kupon + tandai klaim COMPLETED secara atomik
+            tx.executeWithoutResult(s -> {
+                generatedRepo.saveAndFlush(coupon);
+                if (!idempotency.complete(key, token, coupon.getId())) {
+                    // Lease habis dan klaim diambil alih request lain → batalkan simpanan kita
+                    throw new ConflictException("Kupon sedang diterbitkan request lain, silakan ulangi");
+                }
+            });
+
+            log.info("Kupon terbit: id={}, code={}, dari couponId={}, tag={}",
+                    coupon.getId(), coupon.getCouponCode(), req.couponId(), coupon.getTag());
+            return mapper.toResponse(coupon);
+
+        } catch (DataIntegrityViolationException e) {
+            // Kode skd yang sama baru saja diambil request lain (key berbeda) → lepas klaim, minta retry.
+            log.warn("Konflik penyimpanan key={}: {}", key, e.getMostSpecificCause().getMessage());
+            idempotency.release(key, token, e);
+            throw new ConflictException("Kupon sedang diterbitkan request lain, silakan ulangi");
+        } catch (RuntimeException e) {
+            idempotency.release(key, token, e);
+            throw e;
+        }
+    }
+
+    /** Panggil portal dan susun entity kupon (belum disimpan). */
+    private GeneratedCoupon issue(GenerateCouponRequest req) {
         // 2) Coupon sumber harus ada (butuh sku untuk memanggil portal)
         Coupon source = couponRepo.findById(req.couponId())
                 .orElseThrow(() -> new CouponNotFoundException(req.couponId()));
@@ -71,15 +124,11 @@ public class CouponGenerateService {
         }
         String code = text(line, "skd");
 
-        String termsText = text(node, "terms_text");
-        boolean isUsed = line.path("is_used").asBoolean(false);
-        String state = text(line, "state");
-
         String tag = (req.tag() != null && !req.tag().isBlank())
                 ? req.tag()
                 : (Boolean.TRUE.equals(source.getIsInjourney()) ? "sarinah-injourney" : "sarinah");
 
-        // 4) Simpan (ringkasan campaign ikut, supaya response informatif tanpa join)
+        // Ringkasan campaign ikut, supaya response informatif tanpa join
         GeneratedCoupon coupon = new GeneratedCoupon();
         coupon.setIdempotencyKey(req.idempotencyKey());
         coupon.setCouponId(req.couponId());
@@ -92,25 +141,13 @@ public class CouponGenerateService {
         coupon.setStartDate(source.getStartDate());
         coupon.setEndDate(source.getEndDate());
         coupon.setTag(tag);
-        coupon.setState(state);
-        coupon.setIsUsed(isUsed);
-        coupon.setTermsText(termsText);
+        coupon.setState(text(line, "state"));
+        coupon.setIsUsed(line.path("is_used").asBoolean(false));
+        coupon.setTermsText(text(node, "terms_text"));
         coupon.setStatus(CouponStatus.ACTIVE);
         coupon.setCreatedAt(Instant.now());
-        coupon.setRawJson(line != null ? line.toString() : node.toString());
-
-        try {
-            generatedRepo.saveAndFlush(coupon);   // flush sekarang agar error muncul di sini
-        } catch (DataIntegrityViolationException e) {
-            // Race: request lain menyisipkan kode/key yang sama bersamaan.
-            // JANGAN query lagi di transaksi ini (sesi sudah rusak) → minta client retry.
-            log.warn("Konflik penyimpanan code={} key={}", code, req.idempotencyKey());
-            throw new ConflictException("Kupon sedang diterbitkan request lain, silakan ulangi");
-        }
-
-        log.info("Kupon terbit: id={}, code={}, dari couponId={}, tag={}",
-                coupon.getId(), code, req.couponId(), tag);
-        return mapper.toResponse(coupon);
+        coupon.setRawJson(line.toString());
+        return coupon;
     }
 
     private void validate(GenerateCouponRequest req) {

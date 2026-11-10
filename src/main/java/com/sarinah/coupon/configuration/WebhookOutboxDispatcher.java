@@ -14,13 +14,15 @@ import org.springframework.stereotype.Component;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.UUID;
 
 /**
  * Mengirim event PENDING yang sudah jatuh tempo, dengan retry sesuai spec 4.2:
  * 1m, 5m, 15m, 1j, lalu per jam, maksimal 24 jam. Retry hanya untuk 5xx/timeout/gagal koneksi.
  *
- * Catatan: bila aplikasi jalan di lebih dari satu instance, pasang ShedLock (atau sejenisnya)
- * pada method dispatchDue() agar event tidak dikirim dua kali secara bersamaan.
+ * Aman untuk multi-instance: setiap putaran mengklaim baris secara atomik di PostgreSQL
+ * (FOR UPDATE SKIP LOCKED + lease locked_until), sehingga satu event hanya diproses oleh satu
+ * instance. Hasil percobaan hanya disimpan bila putaran ini masih pemegang lock.
  */
 @Slf4j
 @Component
@@ -33,6 +35,8 @@ public class WebhookOutboxDispatcher {
             Duration.ofMinutes(15),
             Duration.ofHours(1));
     private static final Duration AFTER_BACKOFF = Duration.ofHours(1);
+    /** Cadangan waktu di atas estimasi durasi batch sebelum lease dianggap habis. */
+    private static final Duration LEASE_MARGIN = Duration.ofMinutes(1);
 
     private final WebhookOutboxRepository outboxRepository;
     private final PrimeWebhookClient client;
@@ -43,20 +47,35 @@ public class WebhookOutboxDispatcher {
     public void dispatchDue() {
         if (!props.isEnabled()) return;
 
-        List<WebhookOutbox> due = outboxRepository
-                .findByStatusAndNextAttemptAtLessThanEqualOrderByNextAttemptAtAsc(
-                        WebhookOutboxStatus.PENDING, Instant.now(), PageRequest.of(0, props.getBatchSize()));
+        String owner = UUID.randomUUID().toString();
+        Duration perItem = props.getConnectTimeout().plus(props.getReadTimeout());
+        Instant now = Instant.now();
+        // Lease cukup untuk seluruh batch walau setiap kiriman kena timeout penuh.
+        Instant leaseUntil = now.plus(perItem.multipliedBy(props.getBatchSize())).plus(LEASE_MARGIN);
 
-        for (WebhookOutbox item : due) {
-            try {
-                deliver(item);
-            } catch (Exception e) {
-                log.error("Webhook: error tak terduga saat kirim id={}: {}", item.getId(), e.getMessage(), e);
+        int claimed = outboxRepository.claimDue(owner, now, leaseUntil, props.getBatchSize());
+        if (claimed == 0) return;
+
+        try {
+            for (WebhookOutbox item : outboxRepository.findByLockedByOrderByNextAttemptAtAsc(owner)) {
+                // Jangan mulai kiriman yang bisa melewati lease (instance lain bisa mengklaim ulang).
+                if (Instant.now().plus(perItem).plus(LEASE_MARGIN).isAfter(leaseUntil)) {
+                    log.warn("Webhook: lease putaran {} hampir habis, sisa event dilepas", owner);
+                    break;
+                }
+                try {
+                    deliver(item, owner);
+                } catch (Exception e) {
+                    log.error("Webhook: error tak terduga saat kirim id={}: {}", item.getId(), e.getMessage(), e);
+                }
             }
+        } finally {
+            // Baris yang belum diproses (atau gagal tak terduga) dilepas agar bisa diambil putaran berikutnya.
+            outboxRepository.releaseAll(owner);
         }
     }
 
-    void deliver(WebhookOutbox item) {
+    void deliver(WebhookOutbox item, String owner) {
         Instant now = Instant.now();
         PrimeWebhookClient.DeliveryResult r = client.send(item.getBody());
 
@@ -92,7 +111,14 @@ public class WebhookOutboxDispatcher {
                 }
             }
         }
-        outboxRepository.save(item);
+
+        int updated = outboxRepository.finishAttempt(item.getId(), owner, item.getStatus(),
+                item.getAttempts(), item.getLastAttemptAt(), item.getLastHttpStatus(),
+                item.getLastError(), item.getNextAttemptAt(), item.getSentAt());
+        if (updated == 0) {
+            log.warn("Webhook: lock id={} code={} sudah tidak dipegang putaran {}, hasil tidak disimpan",
+                    item.getId(), item.getCouponCode(), owner);
+        }
     }
 
     static Duration backoff(int attemptsSoFar) {
