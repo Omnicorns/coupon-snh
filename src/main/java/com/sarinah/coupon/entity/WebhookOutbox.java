@@ -10,7 +10,7 @@ import lombok.Setter;
 import java.time.Instant;
 
 /**
- * O
+ * Antrian webhook ke PRIME (outbox).
  * Body disimpan sebagai string yang sudah di-serialize SEKALI, jadi byte yang ditandatangani
  * selalu sama dengan byte yang dikirim, termasuk saat retry.
  */
@@ -61,5 +61,13 @@ public class WebhookOutbox {
 
     @Column(name = "sent_at")
     private Instant sentAt;
+
+    /** Token putaran dispatcher yang sedang memegang baris ini (null = bebas). */
+    @Column(name = "locked_by", length = 36)
+    private String lockedBy;
+
+    /** Batas lease; lewat dari ini baris boleh diklaim instance lain. */
+    @Column(name = "locked_until")
+    private Instant lockedUntil;
 }
 
