@@ -92,14 +92,16 @@ public class CouponSyncService {
 
     /**
      * day_of_week_ids → nama hari.
-     *  - field tidak ada / [] → daftar kosong = berlaku setiap hari (sah)
-     *  - elemen tanpa nama valid, atau field bukan array → {@link #INVALID_DAY}, agar
+     *  - [] → daftar kosong = berlaku setiap hari (satu-satunya bentuk "tanpa batasan" yang sah)
+     *  - field tidak ada → daftar kosong; saat generate field yang tidak ada TIDAK menggantikan
+     *    aturan lokal (lihat CouponGenerateService#currentCampaign)
+     *  - null, bukan array, atau elemen tanpa nama valid → {@link #INVALID_DAY}, agar
      *    {@link CampaignEligibility} menolak campaign alih-alih menganggapnya tanpa batasan hari.
      */
     static List<String> dayNames(JsonNode field) {
         List<String> days = new ArrayList<>();
-        if (field.isMissingNode() || field.isNull()) return days;
-        if (!field.isArray()) {
+        if (field.isMissingNode()) return days;
+        if (!field.isArray()) {                        // termasuk null / false / object / string
             days.add(INVALID_DAY);
             return days;
         }

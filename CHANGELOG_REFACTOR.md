@@ -137,8 +137,9 @@ konstruktor `CouponNotFoundException(String)` → HTTP 404 untuk semua bentuk ko
 ### Generate memeriksa kelayakan campaign (High)
 - `CampaignEligibility`: `active = true`, `start_date <= sekarang < end_date`, dan hari ini ada di
   `day_of_week_ids` (kosong = setiap hari). Nama hari Inggris/Indonesia dikenali; nama yang tidak
-  dikenali → ditolak (fail-closed). Elemen hari yang cacat (mis. `[{}]`) atau field yang bukan array
-  juga ditolak; hanya `[]` / field tidak ada yang berarti berlaku setiap hari. Tidak layak → 422.
+  dikenali → ditolak (fail-closed). Elemen hari yang cacat (mis. `[{}]`), `null`, atau field yang
+  bukan array juga ditolak; hanya `[]` yang berarti berlaku setiap hari (field yang tidak ada di
+  respons generate memakai aturan lokal). Tidak layak → 422.
 - Kelayakan dinilai dari template portal TERBARU saat generate (active, start/end date,
   day_of_week_ids), bukan dari hasil sync lokal yang bisa basi; field yang tidak ada di respons
   memakai data lokal, tanggal yang ada tetapi tidak bisa di-parse → 502. Periode yang disimpan
