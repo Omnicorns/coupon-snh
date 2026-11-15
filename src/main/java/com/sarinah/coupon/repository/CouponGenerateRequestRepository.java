@@ -51,6 +51,27 @@ public interface CouponGenerateRequestRepository extends JpaRepository<CouponGen
                  @Param("lockedUntil") Instant lockedUntil,
                  @Param("now") Instant now);
 
+    /**
+     * Ganti request_hash format lama (tanpa partner) ke format baru, hanya untuk baris yang
+     * partner_id-nya sudah cocok (kepemilikan sudah diverifikasi lewat backfill).
+     */
+    @Modifying
+    @Query(value = """
+            UPDATE coupon_generate_requests
+               SET request_hash = :newHash, updated_at = :now
+             WHERE idempotency_key = :key AND partner_id = :partnerId AND request_hash = :oldHash
+            """, nativeQuery = true)
+    int upgradeHash(@Param("key") String key,
+                    @Param("partnerId") String partnerId,
+                    @Param("oldHash") String oldHash,
+                    @Param("newHash") String newHash,
+                    @Param("now") Instant now);
+
+    /** Hash terbaru langsung dari DB (melewati cache persistence context). */
+    @Query(value = "SELECT request_hash FROM coupon_generate_requests WHERE idempotency_key = :key",
+            nativeQuery = true)
+    String currentHash(@Param("key") String key);
+
     /** Tandai selesai — hanya berhasil bila kita masih pemegang klaim. */
     @Modifying
     @Query(value = """

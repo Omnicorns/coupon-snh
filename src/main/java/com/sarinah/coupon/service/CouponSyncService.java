@@ -38,13 +38,17 @@ public class CouponSyncService {
 
         List<Coupon> toSave = new ArrayList<>();
         for (JsonNode node : list) {
-            toSave.add(map(node));
+            toSave.add(toCoupon(node));
         }
         repo.saveAll(toSave);                 // PK = id portal → upsert
         log.info("Sync coupon selesai: {} record", toSave.size());
     }
 
-    private Coupon map(JsonNode n) {
+    /**
+     * Template portal → entity Coupon (tanpa menyimpan). Dipakai juga oleh generate untuk
+     * memvalidasi kelayakan dari data portal terbaru, dengan aturan parsing yang sama.
+     */
+    public Coupon toCoupon(JsonNode n) {
         Coupon c = new Coupon();
         c.setId(n.path("id").asLong());
 

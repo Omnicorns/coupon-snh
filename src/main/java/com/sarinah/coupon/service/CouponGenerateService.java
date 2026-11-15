@@ -9,7 +9,6 @@ import com.sarinah.coupon.dto.GenerateCouponResponse;
 import com.sarinah.coupon.entity.Coupon;
 import com.sarinah.coupon.entity.CouponStatus;
 import com.sarinah.coupon.entity.GeneratedCoupon;
-import com.sarinah.coupon.exception.CampaignNotEligibleException;
 import com.sarinah.coupon.exception.ConflictException;
 import com.sarinah.coupon.exception.IdempotencyKeyReusedException;
 import com.sarinah.coupon.exception.PortalResponseException;
@@ -43,6 +42,7 @@ public class CouponGenerateService {
     private final GenerateIdempotencyService idempotency;
     private final TransactionTemplate tx;
     private final CampaignEligibility eligibility;
+    private final CouponSyncService couponSyncService;
 
     /**
      * Alur idempotency:
@@ -112,10 +112,9 @@ public class CouponGenerateService {
 
     /** Panggil portal dan susun entity kupon (belum disimpan). */
     private GeneratedCoupon issue(String partnerId, GenerateCouponRequest req) {
-        // 2) Coupon sumber harus ada (butuh sku untuk memanggil portal) dan LAYAK diterbitkan sekarang
+        // 2) Coupon sumber harus ada (butuh sku untuk memanggil portal)
         Coupon source = couponRepo.findById(req.couponId())
                 .orElseThrow(() -> new CouponNotFoundException(req.couponId()));
-        eligibility.check(source);
 
         // 3) Panggil portal → mencetak skd baru
         ObjectNode portalReq = JsonNodeFactory.instance.objectNode();
@@ -126,10 +125,11 @@ public class CouponGenerateService {
                     "Portal tidak mengembalikan data untuk coupon " + req.couponId());
         }
         JsonNode node = matchingTemplate(result, source);
-        if (node.path("active").isBoolean() && !node.path("active").asBoolean()) {
-            // Data portal lebih baru dari hasil sync terakhir
-            throw new CampaignNotEligibleException(req.couponId(), "campaign tidak aktif di portal");
-        }
+
+        // Kelayakan dinilai dari template portal TERBARU (active, periode, hari), bukan dari hasil
+        // sync lokal yang bisa basi — mis. masa berlaku dipersingkat di portal sejak sync terakhir.
+        Coupon campaign = currentCampaign(source, node);
+        eligibility.check(campaign);
 
         // Kode kupon = `skd` dari salah satu skd_line yang BELUM dipakai DAN belum kita tag.
         // skd_code (top-level) BUKAN kode kupon — hanya penanda.
@@ -142,7 +142,7 @@ public class CouponGenerateService {
 
         String tag = (req.tag() != null && !req.tag().isBlank())
                 ? req.tag()
-                : (Boolean.TRUE.equals(source.getIsInjourney()) ? "sarinah-injourney" : "sarinah");
+                : (Boolean.TRUE.equals(campaign.getIsInjourney()) ? "sarinah-injourney" : "sarinah");
 
         // Ringkasan campaign ikut, supaya response informatif tanpa join
         GeneratedCoupon coupon = new GeneratedCoupon();
@@ -152,11 +152,12 @@ public class CouponGenerateService {
         coupon.setTransactionId(req.transactionId());
         coupon.setCouponCode(code);
         coupon.setSku(source.getSku());
-        coupon.setCouponName(source.getName());
-        coupon.setDiscPercentage(source.getDiscPercentage());
-        coupon.setScanType(source.getTypeScan());
-        coupon.setStartDate(source.getStartDate());
-        coupon.setEndDate(source.getEndDate());
+        // Periode yang disimpan = periode yang baru saja divalidasi
+        coupon.setCouponName(campaign.getName());
+        coupon.setDiscPercentage(campaign.getDiscPercentage());
+        coupon.setScanType(campaign.getTypeScan());
+        coupon.setStartDate(campaign.getStartDate());
+        coupon.setEndDate(campaign.getEndDate());
         coupon.setTag(tag);
         coupon.setState(text(line, "state"));
         coupon.setIsUsed(line.path("is_used").asBoolean(false));
@@ -165,6 +166,43 @@ public class CouponGenerateService {
         coupon.setCreatedAt(Instant.now());
         coupon.setRawJson(line.toString());
         return coupon;
+    }
+
+    /**
+     * Gabungan data campaign: nilai dari template portal terbaru bila field-nya ada di respons,
+     * selain itu nilai hasil sync lokal. Tanggal yang ada tetapi tidak bisa di-parse → ditolak,
+     * agar periode tidak diam-diam jatuh ke data lama.
+     */
+    private Coupon currentCampaign(Coupon local, JsonNode node) {
+        Coupon fresh = couponSyncService.toCoupon(node);
+        requireParsed(node, "start_date", fresh.getStartDate(), local.getId());
+        requireParsed(node, "end_date", fresh.getEndDate(), local.getId());
+
+        Coupon c = new Coupon();
+        c.setId(local.getId());
+        c.setSku(local.getSku());
+        c.setActive(has(node, "active") ? fresh.getActive() : local.getActive());
+        c.setStartDate(has(node, "start_date") ? fresh.getStartDate() : local.getStartDate());
+        c.setEndDate(has(node, "end_date") ? fresh.getEndDate() : local.getEndDate());
+        c.setDays(node.path("day_of_week_ids").isArray() ? fresh.getDays() : local.getDays());
+        c.setName(fresh.getName() != null ? fresh.getName() : local.getName());
+        c.setDiscPercentage(fresh.getDiscPercentage() != null ? fresh.getDiscPercentage() : local.getDiscPercentage());
+        c.setTypeScan(fresh.getTypeScan() != null ? fresh.getTypeScan() : local.getTypeScan());
+        c.setIsInjourney(fresh.getIsInjourney() != null ? fresh.getIsInjourney() : local.getIsInjourney());
+        return c;
+    }
+
+    private static boolean has(JsonNode node, String field) {
+        return !node.path(field).isMissingNode();
+    }
+
+    /** Field tanggal berisi teks tetapi gagal di-parse → respons portal tidak bisa dipercaya. */
+    private static void requireParsed(JsonNode node, String field, Object parsed, Long couponId) {
+        JsonNode v = node.path(field);
+        if (v.isTextual() && !v.asText().isBlank() && parsed == null) {
+            throw new PortalResponseException("Template coupon " + couponId + ": " + field
+                    + " tidak valid '" + v.asText() + "'");
+        }
     }
 
     /**

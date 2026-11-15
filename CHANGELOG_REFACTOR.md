@@ -130,13 +130,19 @@ konstruktor `CouponNotFoundException(String)` → HTTP 404 untuk semua bentuk ko
   `UPDATE generated_coupons SET partner_id = '<partner>' WHERE partner_id IS NULL AND ...;`
   (sesuaikan kriteria, mis. berdasarkan `tag` atau `transaction_id`). Lakukan hal yang sama
   untuk `coupon_generate_requests` bila retry key lama masih diharapkan berhasil.
+- Klaim lama memakai `request_hash` tanpa partner. Setelah `partner_id` di-backfill, retry dengan
+  isi request yang sama dicocokkan ke format hash lama lalu hash-nya ditingkatkan otomatis
+  (atomik, aman untuk retry bersamaan). Klaim tanpa `partner_id` tetap ditolak.
 
 ### Generate memeriksa kelayakan campaign (High)
 - `CampaignEligibility`: `active = true`, `start_date <= sekarang < end_date`, dan hari ini ada di
   `day_of_week_ids` (kosong = setiap hari). Nama hari Inggris/Indonesia dikenali; nama yang tidak
   dikenali → ditolak (fail-closed). Tidak layak → 422, portal tidak dipanggil.
-- Template portal dipilih berdasarkan id DAN sku campaign (bukan elemen pertama); `active=false`
-  di portal juga ditolak.
+- Kelayakan dinilai dari template portal TERBARU saat generate (active, start/end date,
+  day_of_week_ids), bukan dari hasil sync lokal yang bisa basi; field yang tidak ada di respons
+  memakai data lokal, tanggal yang ada tetapi tidak bisa di-parse → 502. Periode yang disimpan
+  pada kupon adalah periode yang baru divalidasi.
+- Template portal dipilih berdasarkan id DAN sku campaign (bukan elemen pertama).
 - Zona waktu tunggal lewat `PortalTime` (`sarinah-portal.timezone`, default `Asia/Jakarta`) dipakai
   untuk semua perbandingan "sekarang" dan format ISO di response/webhook.
 
@@ -144,7 +150,10 @@ konstruktor `CouponNotFoundException(String)` → HTTP 404 untuk semua bentuk ko
 - Adaptor menolak HTTP non-2xx, body kosong, non-JSON, dan object error (`PortalResponseException`,
   di endpoint → 502). Object tunggal hanya diterima bila berbentuk data (punya `id`).
 - Sync is_used memvalidasi respons per SKU sebelum mengubah status: sku harus cocok, template harus
-  punya `id` dan `skd_line` array yang tidak kosong. Kupon hanya dicocokkan dengan template
+  punya `id` dan `skd_line` array yang tidak kosong, dan SETIAP baris harus object dengan `skd`
+  terisi dan unik (satu baris cacat → template ditolak).
+- Pengaman: bila lebih dari `coupon.sync.max-revoke-per-template` (default 5) kode satu campaign
+  hilang dari skd_line dalam satu putaran, revoke ditahan dan dicatat error. Kupon hanya dicocokkan dengan template
   campaign-nya sendiri (`couponId`). Respons tidak valid → SKU dilewati, tidak ada status yang berubah.
 
 ### /generated hanya kupon yang benar-benar bisa dipakai (High)

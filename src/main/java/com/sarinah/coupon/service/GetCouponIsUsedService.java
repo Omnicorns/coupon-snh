@@ -15,6 +15,7 @@ import com.sarinah.coupon.webhook.CouponWebhookPublisher;
 import com.sarinah.coupon.webhook.RedemptionDetail;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -38,6 +39,10 @@ public class GetCouponIsUsedService {
     private final RedemptionDetailResolver redemptionDetailResolver;  // memakai PostOrderHistoryService
     private final CouponWebhookPublisher webhookPublisher;
     private final PortalTime time;
+
+    /** Batas revoke per template per putaran; lebih dari ini revoke ditahan. */
+    @Value("${coupon.sync.max-revoke-per-template:5}")
+    private int maxRevokePerTemplate;
 
     public SyncIsUsedResponse syncIsUsed() {
         // 1) hanya yang belum used
@@ -68,16 +73,38 @@ public class GetCouponIsUsedService {
                 continue;
             }
 
+            // Pengaman: terlalu banyak kode "hilang" dari satu template dalam satu putaran lebih
+            // mungkin respons tidak lengkap daripada pencabutan sungguhan → tahan revoke template itu.
+            Map<String, Long> missingByTemplate = entry.getValue().stream()
+                    .filter(c -> c.getStatus() != CouponStatus.REVOKED)
+                    .filter(c -> {
+                        PortalTemplate t = templates.get(String.valueOf(c.getCouponId()));
+                        return t != null && !t.lineBySkd().containsKey(c.getCouponCode());
+                    })
+                    .collect(Collectors.groupingBy(c -> String.valueOf(c.getCouponId()), Collectors.counting()));
+            missingByTemplate.forEach((tplId, n) -> {
+                if (n > maxRevokePerTemplate) {
+                    log.error("Sync: {} kode campaign {} (sku={}) tidak ada di skd_line portal, melebihi batas {} → "
+                            + "revoke DITAHAN, periksa respons portal / naikkan coupon.sync.max-revoke-per-template",
+                            n, tplId, sku, maxRevokePerTemplate);
+                }
+            });
+
             // 4) cocokkan tiap kupon dengan template campaign-nya (error per kupon tidak menghentikan kupon lain)
             for (GeneratedCoupon c : entry.getValue()) {
-                PortalTemplate tpl = templates.get(String.valueOf(c.getCouponId()));
+                String tplId = String.valueOf(c.getCouponId());
+                PortalTemplate tpl = templates.get(tplId);
                 if (tpl == null) {
                     log.warn("Sync: template campaign {} (sku={}) tidak ada di respons portal, code={} dilewati",
                             c.getCouponId(), sku, c.getCouponCode());
                     continue;
                 }
+                JsonNode line = tpl.lineBySkd().get(c.getCouponCode());
+                if (line == null && missingByTemplate.getOrDefault(tplId, 0L) > maxRevokePerTemplate) {
+                    continue;   // revoke ditahan (lihat log error di atas)
+                }
                 try {
-                    if (applyPortalState(c, tpl.lineBySkd().get(c.getCouponCode()), tpl)) {
+                    if (applyPortalState(c, line, tpl)) {
                         updated++;
                     }
                 } catch (Exception e) {
@@ -124,13 +151,19 @@ public class GetCouponIsUsedService {
                 // lebih mungkin respons tidak lengkap daripada semua kode dicabut.
                 throw new PortalResponseException("skd_line template " + templateId + " kosong");
             }
+            // SEMUA baris harus valid: satu baris cacat berarti daftar tidak bisa dianggap lengkap,
+            // dan kode yang "hilang" belum tentu dicabut.
             Map<String, JsonNode> lineBySkd = new HashMap<>();
+            int idx = 0;
             for (JsonNode line : lines) {
-                String skd = textOrNull(line, "skd");
-                if (skd != null) lineBySkd.put(skd, line);
-            }
-            if (lineBySkd.isEmpty()) {
-                throw new PortalResponseException("skd_line template " + templateId + " tanpa field skd");
+                String skd = line.isObject() ? textOrNull(line, "skd") : null;
+                if (skd == null || skd.isBlank()) {
+                    throw new PortalResponseException("skd_line[" + idx + "] template " + templateId + " tanpa skd");
+                }
+                if (lineBySkd.put(skd, line) != null) {
+                    throw new PortalResponseException("skd '" + skd + "' muncul ganda di template " + templateId);
+                }
+                idx++;
             }
             byId.put(templateId, new PortalTemplate(templateId, portalSku, textOrNull(node, "name"), lineBySkd));
         }
