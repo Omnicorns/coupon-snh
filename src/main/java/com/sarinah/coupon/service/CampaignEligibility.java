@@ -62,12 +62,16 @@ public class CampaignEligibility {
         }
     }
 
-    /** Kosong = berlaku setiap hari. */
+    /** Daftar kosong = berlaku setiap hari; elemen kosong/tidak dikenali = ditolak. */
     static Set<DayOfWeek> parseDays(Long couponId, List<String> names) {
         Set<DayOfWeek> days = EnumSet.noneOf(DayOfWeek.class);
         if (names == null) return days;
         for (String raw : names) {
-            if (raw == null || raw.isBlank()) continue;
+            // Elemen tanpa nama (mis. day_of_week_ids: [{}]) adalah data cacat, BUKAN "tanpa batasan
+            // hari" → tolak. Hanya daftar yang benar-benar kosong yang berarti berlaku setiap hari.
+            if (raw == null || raw.isBlank()) {
+                throw new CampaignNotEligibleException(couponId, "aturan hari campaign tidak valid (nama hari kosong)");
+            }
             String key = raw.toLowerCase(Locale.ROOT).replaceAll("[^a-z]", "");
             DayOfWeek d = DAY_NAMES.get(key);
             if (d == null) {

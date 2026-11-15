@@ -137,7 +137,8 @@ konstruktor `CouponNotFoundException(String)` → HTTP 404 untuk semua bentuk ko
 ### Generate memeriksa kelayakan campaign (High)
 - `CampaignEligibility`: `active = true`, `start_date <= sekarang < end_date`, dan hari ini ada di
   `day_of_week_ids` (kosong = setiap hari). Nama hari Inggris/Indonesia dikenali; nama yang tidak
-  dikenali → ditolak (fail-closed). Tidak layak → 422, portal tidak dipanggil.
+  dikenali → ditolak (fail-closed). Elemen hari yang cacat (mis. `[{}]`) atau field yang bukan array
+  juga ditolak; hanya `[]` / field tidak ada yang berarti berlaku setiap hari. Tidak layak → 422.
 - Kelayakan dinilai dari template portal TERBARU saat generate (active, start/end date,
   day_of_week_ids), bukan dari hasil sync lokal yang bisa basi; field yang tidak ada di respons
   memakai data lokal, tanggal yang ada tetapi tidak bisa di-parse → 502. Periode yang disimpan
@@ -152,8 +153,13 @@ konstruktor `CouponNotFoundException(String)` → HTTP 404 untuk semua bentuk ko
 - Sync is_used memvalidasi respons per SKU sebelum mengubah status: sku harus cocok, template harus
   punya `id` dan `skd_line` array yang tidak kosong, dan SETIAP baris harus object dengan `skd`
   terisi dan unik (satu baris cacat → template ditolak).
-- Pengaman: bila lebih dari `coupon.sync.max-revoke-per-template` (default 5) kode satu campaign
-  hilang dari skd_line dalam satu putaran, revoke ditahan dan dicatat error. Kupon hanya dicocokkan dengan template
+- **Revoke berdasarkan ketidakhadiran kode NONAKTIF secara default**
+  (`coupon.sync.revoke-on-missing.enabled=false`). Daftar yang terpotong tidak bisa dideteksi dari
+  isi respons, jadi kode yang hilang hanya dicatat di `generated_coupons.portal_missing_since`
+  (+ log) dan dihapus tandanya bila muncul lagi. Kedaluwarsa berbasis tanggal tetap berjalan.
+- Bila diaktifkan (setelah tim portal menjamin skd_line selalu lengkap), revoke hanya terjadi bila
+  kode hilang terus-menerus selama `confirm-after` (default 1 jam) dan jumlah kode hilang per
+  template tidak melebihi `coupon.sync.max-revoke-per-template` (default 5). Kupon hanya dicocokkan dengan template
   campaign-nya sendiri (`couponId`). Respons tidak valid → SKU dilewati, tidak ada status yang berubah.
 
 ### /generated hanya kupon yang benar-benar bisa dipakai (High)

@@ -184,7 +184,7 @@ public class CouponGenerateService {
         c.setActive(has(node, "active") ? fresh.getActive() : local.getActive());
         c.setStartDate(has(node, "start_date") ? fresh.getStartDate() : local.getStartDate());
         c.setEndDate(has(node, "end_date") ? fresh.getEndDate() : local.getEndDate());
-        c.setDays(node.path("day_of_week_ids").isArray() ? fresh.getDays() : local.getDays());
+        c.setDays(has(node, "day_of_week_ids") ? fresh.getDays() : local.getDays());
         c.setName(fresh.getName() != null ? fresh.getName() : local.getName());
         c.setDiscPercentage(fresh.getDiscPercentage() != null ? fresh.getDiscPercentage() : local.getDiscPercentage());
         c.setTypeScan(fresh.getTypeScan() != null ? fresh.getTypeScan() : local.getTypeScan());

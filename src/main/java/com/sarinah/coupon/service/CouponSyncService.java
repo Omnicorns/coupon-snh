@@ -83,16 +83,35 @@ public class CouponSyncService {
         c.setWriteUid(text(n, "write_uid"));
         c.setWriteDate(dateTime(n, "write_date"));
 
-        List<String> days = new ArrayList<>();
-        for (JsonNode d : n.path("day_of_week_ids")) {   // bukan "days"
-            days.add(d.path("name").asText());
-        }
-        c.setDays(days);
+        c.setDays(dayNames(n.path("day_of_week_ids")));   // bukan "days"
 
         c.setRawJson(n.toString());
         c.setSyncedAt(Instant.now());
         return c;
     }
+
+    /**
+     * day_of_week_ids → nama hari.
+     *  - field tidak ada / [] → daftar kosong = berlaku setiap hari (sah)
+     *  - elemen tanpa nama valid, atau field bukan array → {@link #INVALID_DAY}, agar
+     *    {@link CampaignEligibility} menolak campaign alih-alih menganggapnya tanpa batasan hari.
+     */
+    static List<String> dayNames(JsonNode field) {
+        List<String> days = new ArrayList<>();
+        if (field.isMissingNode() || field.isNull()) return days;
+        if (!field.isArray()) {
+            days.add(INVALID_DAY);
+            return days;
+        }
+        for (JsonNode d : field) {
+            JsonNode name = d.isObject() ? d.path("name") : d;   // {"name": "Monday"} atau "Monday"
+            days.add(name.isTextual() && !name.asText().isBlank() ? name.asText() : INVALID_DAY);
+        }
+        return days;
+    }
+
+    /** Penanda nama hari yang tidak bisa dibaca dari portal; selalu ditolak oleh parser hari. */
+    public static final String INVALID_DAY = "";
 
     // ---- helper: Odoo isi field kosong dengan `false` ----
 

@@ -18,6 +18,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -39,6 +41,17 @@ public class GetCouponIsUsedService {
     private final RedemptionDetailResolver redemptionDetailResolver;  // memakai PostOrderHistoryService
     private final CouponWebhookPublisher webhookPublisher;
     private final PortalTime time;
+
+    /**
+     * Revoke berdasarkan KETIDAKHADIRAN kode di skd_line. Nonaktif secara default: aktifkan hanya
+     * setelah tim portal menjamin skd_line selalu berisi daftar lengkap (tanpa paginasi/pemotongan).
+     */
+    @Value("${coupon.sync.revoke-on-missing.enabled:false}")
+    private boolean revokeOnMissing;
+
+    /** Kode harus hilang terus-menerus selama ini sebelum di-revoke (melewati beberapa putaran sync). */
+    @Value("${coupon.sync.revoke-on-missing.confirm-after:PT1H}")
+    private Duration revokeConfirmAfter;
 
     /** Batas revoke per template per putaran; lebih dari ini revoke ditahan. */
     @Value("${coupon.sync.max-revoke-per-template:5}")
@@ -73,8 +86,7 @@ public class GetCouponIsUsedService {
                 continue;
             }
 
-            // Pengaman: terlalu banyak kode "hilang" dari satu template dalam satu putaran lebih
-            // mungkin respons tidak lengkap daripada pencabutan sungguhan → tahan revoke template itu.
+            // Kode yang tidak ada di skd_line per template (kandidat revoke)
             Map<String, Long> missingByTemplate = entry.getValue().stream()
                     .filter(c -> c.getStatus() != CouponStatus.REVOKED)
                     .filter(c -> {
@@ -83,7 +95,7 @@ public class GetCouponIsUsedService {
                     })
                     .collect(Collectors.groupingBy(c -> String.valueOf(c.getCouponId()), Collectors.counting()));
             missingByTemplate.forEach((tplId, n) -> {
-                if (n > maxRevokePerTemplate) {
+                if (revokeOnMissing && n > maxRevokePerTemplate) {
                     log.error("Sync: {} kode campaign {} (sku={}) tidak ada di skd_line portal, melebihi batas {} → "
                             + "revoke DITAHAN, periksa respons portal / naikkan coupon.sync.max-revoke-per-template",
                             n, tplId, sku, maxRevokePerTemplate);
@@ -100,10 +112,19 @@ public class GetCouponIsUsedService {
                     continue;
                 }
                 JsonNode line = tpl.lineBySkd().get(c.getCouponCode());
-                if (line == null && missingByTemplate.getOrDefault(tplId, 0L) > maxRevokePerTemplate) {
-                    continue;   // revoke ditahan (lihat log error di atas)
-                }
                 try {
+                    if (line == null) {
+                        // Kedaluwarsa berbasis tanggal tetap berlaku walau kodenya tidak ada di portal
+                        if (handleMissing(c, tpl, missingByTemplate.getOrDefault(tplId, 0L))
+                                || expireIfDue(c, tpl)) {
+                            updated++;
+                        }
+                        continue;
+                    }
+                    if (c.getPortalMissingSince() != null) {
+                        generatedCouponRepository.clearPortalMissing(c.getId());
+                        log.info("Sync: code={} muncul lagi di skd_line portal, tanda hilang dihapus", c.getCouponCode());
+                    }
                     if (applyPortalState(c, line, tpl)) {
                         updated++;
                     }
@@ -173,18 +194,42 @@ public class GetCouponIsUsedService {
         return byId;
     }
 
+    /**
+     * Kode tidak ada di skd_line portal. Ketidakhadiran BUKAN bukti pencabutan (respons bisa
+     * terpotong tanpa terdeteksi), jadi:
+     *  - selalu catat portal_missing_since (pertama kali hilang) untuk pemantauan;
+     *  - revoke hanya bila coupon.sync.revoke-on-missing.enabled=true, kode sudah hilang terus-menerus
+     *    selama confirm-after, dan jumlah kode hilang di template tidak melebihi batas.
+     *
+     * @return true bila status berubah
+     */
+    private boolean handleMissing(GeneratedCoupon c, PortalTemplate tpl, long missingInTemplate) {
+        if (c.getStatus() == CouponStatus.REVOKED) return false;
+        Instant now = Instant.now();
+        if (c.getPortalMissingSince() == null) {
+            generatedCouponRepository.markPortalMissing(c.getId(), now);
+            log.warn("Sync: code={} tidak ada di skd_line portal (sku={}), dicatat sebagai hilang{}",
+                    c.getCouponCode(), tpl.sku(), revokeOnMissing ? ", menunggu konfirmasi " + revokeConfirmAfter : "");
+            return false;
+        }
+        if (!revokeOnMissing) {
+            log.debug("Sync: code={} masih hilang sejak {} (revoke-on-missing nonaktif)",
+                    c.getCouponCode(), c.getPortalMissingSince());
+            return false;
+        }
+        if (missingInTemplate > maxRevokePerTemplate) return false;           // ditahan, lihat log error
+        if (c.getPortalMissingSince().plus(revokeConfirmAfter).isAfter(now)) return false;   // belum terkonfirmasi
+
+        boolean changed = webhookPublisher.markRevoked(c, tpl.id());
+        if (changed) {
+            log.warn("Sync: code={} hilang dari skd_line portal sejak {} (sku={}) -> REVOKED",
+                    c.getCouponCode(), c.getPortalMissingSince(), tpl.sku());
+        }
+        return changed;
+    }
+
     /** @return true bila status kupon berubah (disimpan + event masuk antrean). */
     private boolean applyPortalState(GeneratedCoupon c, JsonNode line, PortalTemplate tpl) {
-
-        // Aturan 3: skd tidak ada lagi di skd_line portal (yang sudah tervalidasi lengkap) -> REVOKED
-        if (line == null) {
-            if (c.getStatus() == CouponStatus.REVOKED) return false;   // sudah dikirim sebelumnya
-            boolean changed = webhookPublisher.markRevoked(c, tpl.id());
-            if (changed) {
-                log.warn("Sync: code={} tidak ada di skd_line portal (sku={}) -> REVOKED", c.getCouponCode(), tpl.sku());
-            }
-            return changed;
-        }
 
         // Aturan 1: sudah dipakai -> REDEEMED (menang atas expired) -> event coupon.redeemed
         if (line.path("is_used").asBoolean(false)) {
@@ -206,17 +251,20 @@ public class GetCouponIsUsedService {
         }
 
         // Aturan 2: belum dipakai tapi tanggal lewat end -> EXPIRED -> event coupon.expired
-        if (isExpired(c)) {
-            if (c.getStatus() != CouponStatus.ACTIVE) return false;    // sudah EXPIRED / REVOKED
-            boolean changed = webhookPublisher.markExpired(c, tpl.id());
-            if (changed) {
-                log.info("Sync: code={} -> EXPIRED (endDate={})", c.getCouponCode(), c.getEndDate());
-            }
-            return changed;
-        }
+        if (expireIfDue(c, tpl)) return true;
 
         // selain itu: masih ACTIVE, biarkan
         return false;
+    }
+
+    /** ACTIVE yang sudah lewat end_date → EXPIRED. @return true bila status berubah */
+    private boolean expireIfDue(GeneratedCoupon c, PortalTemplate tpl) {
+        if (c.getStatus() != CouponStatus.ACTIVE || !isExpired(c)) return false;
+        boolean changed = webhookPublisher.markExpired(c, tpl.id());
+        if (changed) {
+            log.info("Sync: code={} -> EXPIRED (endDate={})", c.getCouponCode(), c.getEndDate());
+        }
+        return changed;
     }
 
     private LocalDateTime parseRedeemDate(String value) {

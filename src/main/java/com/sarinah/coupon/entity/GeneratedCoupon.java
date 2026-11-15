@@ -75,4 +75,11 @@ public class GeneratedCoupon {
     private String rawJson;
 
     private Instant createdAt;
+
+    /**
+     * Kapan kode ini PERTAMA kali tidak ditemukan di skd_line portal (null = ada / belum pernah hilang).
+     * Ketidakhadiran saja bukan bukti pencabutan; kolom ini untuk pemantauan dan masa konfirmasi.
+     */
+    @Column(name = "portal_missing_since")
+    private Instant portalMissingSince;
 }

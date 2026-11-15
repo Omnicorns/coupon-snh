@@ -7,7 +7,9 @@ import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.Collection;
 import java.util.List;
@@ -70,6 +72,18 @@ public interface GeneratedCouponRepository extends JpaRepository<GeneratedCoupon
     int transitionStatus(@Param("id") Long id,
                          @Param("target") CouponStatus target,
                          @Param("from") Collection<CouponStatus> from);
+
+    /** Catat pertama kali kode tidak ada di skd_line portal (tidak menimpa waktu yang sudah ada). */
+    @Modifying
+    @Transactional
+    @Query("update GeneratedCoupon c set c.portalMissingSince = :now where c.id = :id and c.portalMissingSince is null")
+    int markPortalMissing(@Param("id") Long id, @Param("now") Instant now);
+
+    /** Kode muncul lagi di portal → hapus tanda hilang. */
+    @Modifying
+    @Transactional
+    @Query("update GeneratedCoupon c set c.portalMissingSince = null where c.id = :id and c.portalMissingSince is not null")
+    int clearPortalMissing(@Param("id") Long id);
 
     /** Tandai REDEEMED (+ is_used, state, redeemDate) hanya bila belum REDEEMED. */
     @Modifying
