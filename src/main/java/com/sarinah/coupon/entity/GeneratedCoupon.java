@@ -17,7 +17,8 @@ import java.time.LocalDateTime;
         uniqueConstraints = {
                 @UniqueConstraint(name = "uk_idempotency_key", columnNames = "idempotency_key"),
                 @UniqueConstraint(name = "uk_coupon_code", columnNames = "coupon_code")
-        })
+        },
+        indexes = @Index(name = "idx_generated_partner_status", columnList = "partner_id, status"))
 @Getter
 @Setter
 @NoArgsConstructor
@@ -32,6 +33,13 @@ public class GeneratedCoupon {
 
     @Column(name = "coupon_id", nullable = false)
     private Long couponId;                 // id coupon SUMBER (259)
+
+    /**
+     * Partner pemilik kupon (dari API key saat generate). Semua endpoint baca memfilter kolom ini;
+     * baris lama yang masih null tidak terlihat oleh partner mana pun sampai di-backfill.
+     */
+    @Column(name = "partner_id", length = 100)
+    private String partnerId;
 
     @Column(name = "transaction_id")
     private String transactionId;          // id transaksi pihak ketiga
@@ -67,4 +75,11 @@ public class GeneratedCoupon {
     private String rawJson;
 
     private Instant createdAt;
+
+    /**
+     * Kapan kode ini PERTAMA kali tidak ditemukan di skd_line portal (null = ada / belum pernah hilang).
+     * Ketidakhadiran saja bukan bukti pencabutan; kolom ini untuk pemantauan dan masa konfirmasi.
+     */
+    @Column(name = "portal_missing_since")
+    private Instant portalMissingSince;
 }

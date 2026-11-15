@@ -3,6 +3,7 @@ package com.sarinah.coupon.service;
 import com.sarinah.coupon.dto.CouponResponse;
 import com.sarinah.coupon.exception.CouponNotFoundException;
 import com.sarinah.coupon.repository.CouponRepository;
+import com.sarinah.coupon.util.PortalTime;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -21,6 +22,7 @@ public class CouponQueryService {
 
     private final CouponRepository repo;
     private final CouponTransformer transformer;
+    private final PortalTime time;
 
     public List<CouponResponse> getAll() {
         return repo.findAll().stream().map(transformer::toResponse).toList();
@@ -32,7 +34,7 @@ public class CouponQueryService {
 
     /** Kupon yang berlaku saat ini (aktif & dalam rentang tanggal). */
     public List<CouponResponse> getValidNow() {
-        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime now = time.now();
         return repo.findByActiveTrueAndStartDateBeforeAndEndDateAfter(now, now)
                 .stream().map(transformer::toResponse).toList();
     }

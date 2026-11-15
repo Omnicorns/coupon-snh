@@ -38,6 +38,17 @@ public class GlobalExceptionHandler {
         return build(HttpStatus.valueOf(422), e.getMessage());
     }
 
+    @ExceptionHandler(CampaignNotEligibleException.class)
+    public ResponseEntity<Map<String, Object>> notEligible(CampaignNotEligibleException e) {
+        return build(HttpStatus.valueOf(422), e.getMessage());
+    }
+
+    @ExceptionHandler(PortalResponseException.class)
+    public ResponseEntity<Map<String, Object>> portalError(PortalResponseException e) {
+        log.warn("Portal error: {}", e.getMessage());
+        return build(HttpStatus.BAD_GATEWAY, "Portal sumber kupon sedang bermasalah, silakan ulangi");
+    }
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<Map<String, Object>> generic(Exception e) {
         log.error("Unhandled error", e);

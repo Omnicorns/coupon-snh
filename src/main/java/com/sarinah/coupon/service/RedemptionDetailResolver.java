@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sarinah.coupon.webhook.CouponWebhookPayload.DiscountApplied;
 import com.sarinah.coupon.webhook.PrimeWebhookProperties;
 import com.sarinah.coupon.webhook.RedemptionDetail;
+import com.sarinah.coupon.util.PortalTime;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -18,7 +19,6 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import java.time.ZoneId;
 
 /**
  * Ambil detail transaksi dari order history POS untuk event coupon.redeemed:
@@ -40,7 +40,7 @@ public class RedemptionDetailResolver {
     private final PostOrderHistoryService postOrderHistoryService;
     private final PrimeWebhookProperties props;
 
-    private static final ZoneId ZONE = ZoneId.of("Asia/Jakarta");
+    private final PortalTime time;
 
     /**
      * @param receiptNumber skd_line.order_id_char, mis. "Order 59511-006-0012"
@@ -90,7 +90,7 @@ public class RedemptionDetailResolver {
 
     // SESUDAH
     private JsonNode findOrder(String receiptNumber, LocalDateTime redeemedAt) {
-        LocalDate day = redeemedAt != null ? redeemedAt.toLocalDate() : LocalDate.now(ZONE);
+        LocalDate day = redeemedAt != null ? redeemedAt.toLocalDate() : time.now().toLocalDate();
 
         int n = Math.max(0, props.getOrderLookupDays());
         JsonNode order = queryAround(receiptNumber, day, n);
@@ -108,7 +108,7 @@ public class RedemptionDetailResolver {
     private JsonNode queryAround(String receiptNumber, LocalDate day, int days) {
         LocalDate from = day.minusDays(days);
         LocalDate to = day.plusDays(days);
-        LocalDate today = LocalDate.now(ZONE);
+        LocalDate today = time.now().toLocalDate();
         if (to.isAfter(today)) to = today;
         if (from.isAfter(to)) from = to;
         return query(receiptNumber, from.format(DATE), to.format(DATE));
@@ -135,8 +135,8 @@ public class RedemptionDetailResolver {
      *   1) product diawali kode sku, mis. "[DCDWP00220] ..."   -> paling pasti
      *   2) product mengandung name template (tidak case-sensitive;
      *      portal "Injourney" vs POS "InJourney")
-     *   3) hanya ada satu baris minus -> pakai itu
-     *   selain itu -> null (lebih baik tidak dikirim daripada salah nominal)
+     *   selain itu -> null (lebih baik tidak dikirim daripada salah nominal; baris minus
+     *   lain bisa berupa diskon lain atau retur, termasuk bila hanya ada satu)
      */
     private DiscountApplied findCouponDiscount(JsonNode orderLines, String sku, String couponName, String ref) {
         List<JsonNode> negatives = new ArrayList<>();
@@ -170,10 +170,9 @@ public class RedemptionDetailResolver {
             amount = bySku;
         } else if (nameFound) {
             amount = byName;
-        } else if (negatives.size() == 1) {
-            log.warn("Order {}: baris diskon tidak cocok sku/name, pakai satu-satunya baris minus", ref);
-            amount = lineAmount(negatives.get(0));
         } else {
+            // Baris minus yang tidak cocok bisa diskon lain atau retur → jangan ditebak,
+            // walaupun hanya ada satu. Lebih baik discountApplied kosong daripada salah nominal.
             log.warn("Order {}: {} baris minus, tidak ada yang cocok sku '{}' / name '{}', discount tidak dikirim",
                     ref, negatives.size(), sku, couponName);
             return null;

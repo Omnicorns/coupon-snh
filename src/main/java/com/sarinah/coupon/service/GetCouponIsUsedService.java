@@ -6,18 +6,21 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import com.sarinah.coupon.dto.SyncIsUsedResponse;
+import com.sarinah.coupon.exception.PortalResponseException;
+import com.sarinah.coupon.util.PortalTime;
 import com.sarinah.coupon.entity.CouponStatus;
 import com.sarinah.coupon.entity.GeneratedCoupon;
 import com.sarinah.coupon.repository.GeneratedCouponRepository;
 import com.sarinah.coupon.webhook.CouponWebhookPublisher;
 import com.sarinah.coupon.webhook.RedemptionDetail;
-import com.sarinah.coupon.webhook.WebhookEventType;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.time.LocalDateTime;
-import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -31,13 +34,28 @@ import java.util.stream.Collectors;
 public class GetCouponIsUsedService {
 
     private static final DateTimeFormatter SRC = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
-    // write_date portal adalah string tanpa zona; samakan dengan zona portal
-    private static final ZoneId ZONE = ZoneId.of("Asia/Jakarta");
+    // write_date portal adalah string tanpa zona; zona ditentukan PortalTime
 
     private final GeneratedCouponRepository generatedCouponRepository;
     private final PostCouponListService postCouponListService;
     private final RedemptionDetailResolver redemptionDetailResolver;  // memakai PostOrderHistoryService
     private final CouponWebhookPublisher webhookPublisher;
+    private final PortalTime time;
+
+    /**
+     * Revoke berdasarkan KETIDAKHADIRAN kode di skd_line. Nonaktif secara default: aktifkan hanya
+     * setelah tim portal menjamin skd_line selalu berisi daftar lengkap (tanpa paginasi/pemotongan).
+     */
+    @Value("${coupon.sync.revoke-on-missing.enabled:false}")
+    private boolean revokeOnMissing;
+
+    /** Kode harus hilang terus-menerus selama ini sebelum di-revoke (melewati beberapa putaran sync). */
+    @Value("${coupon.sync.revoke-on-missing.confirm-after:PT1H}")
+    private Duration revokeConfirmAfter;
+
+    /** Batas revoke per template per putaran; lebih dari ini revoke ditahan. */
+    @Value("${coupon.sync.max-revoke-per-template:5}")
+    private int maxRevokePerTemplate;
 
     public SyncIsUsedResponse syncIsUsed() {
         // 1) hanya yang belum used
@@ -47,8 +65,9 @@ public class GetCouponIsUsedService {
             return new SyncIsUsedResponse(0, 0, List.of());
         }
 
-        // 2) group by sku -> 1 panggilan portal per sku
+        // 2) group by sku -> 1 panggilan portal per sku (kupon tanpa sku tidak bisa dicek)
         Map<String, List<GeneratedCoupon>> bySku = pending.stream()
+                .filter(c -> c.getSku() != null)
                 .collect(Collectors.groupingBy(GeneratedCoupon::getSku));
 
         int updated = 0;
@@ -57,23 +76,56 @@ public class GetCouponIsUsedService {
         for (Map.Entry<String, List<GeneratedCoupon>> entry : bySku.entrySet()) {
             String sku = entry.getKey();
 
-            PortalTemplate tpl;
+            // 3) Respons yang tidak bisa dipercaya → lewati SKU ini, JANGAN ubah status apa pun
+            Map<String, PortalTemplate> templates;
             try {
-                tpl = fetchPortalTemplate(sku);
+                templates = fetchPortalTemplates(sku);
             } catch (Exception e) {
-                log.error("Sync is_used gagal untuk sku={}: {}", sku, e.getMessage());
-                failedSkus.add(sku);
-                continue;
-            }
-            if (tpl == null) {
+                log.error("Sync is_used gagal untuk sku={}, tidak ada status yang diubah: {}", sku, e.getMessage());
                 failedSkus.add(sku);
                 continue;
             }
 
-            // 4) cocokkan tiap kupon dengan line portal-nya (error per kupon tidak menghentikan kupon lain)
+            // Kode yang tidak ada di skd_line per template (kandidat revoke)
+            Map<String, Long> missingByTemplate = entry.getValue().stream()
+                    .filter(c -> c.getStatus() != CouponStatus.REVOKED)
+                    .filter(c -> {
+                        PortalTemplate t = templates.get(String.valueOf(c.getCouponId()));
+                        return t != null && !t.lineBySkd().containsKey(c.getCouponCode());
+                    })
+                    .collect(Collectors.groupingBy(c -> String.valueOf(c.getCouponId()), Collectors.counting()));
+            missingByTemplate.forEach((tplId, n) -> {
+                if (revokeOnMissing && n > maxRevokePerTemplate) {
+                    log.error("Sync: {} kode campaign {} (sku={}) tidak ada di skd_line portal, melebihi batas {} → "
+                            + "revoke DITAHAN, periksa respons portal / naikkan coupon.sync.max-revoke-per-template",
+                            n, tplId, sku, maxRevokePerTemplate);
+                }
+            });
+
+            // 4) cocokkan tiap kupon dengan template campaign-nya (error per kupon tidak menghentikan kupon lain)
             for (GeneratedCoupon c : entry.getValue()) {
+                String tplId = String.valueOf(c.getCouponId());
+                PortalTemplate tpl = templates.get(tplId);
+                if (tpl == null) {
+                    log.warn("Sync: template campaign {} (sku={}) tidak ada di respons portal, code={} dilewati",
+                            c.getCouponId(), sku, c.getCouponCode());
+                    continue;
+                }
+                JsonNode line = tpl.lineBySkd().get(c.getCouponCode());
                 try {
-                    if (applyPortalState(c, tpl.lineBySkd().get(c.getCouponCode()), tpl)) {
+                    if (line == null) {
+                        // Kedaluwarsa berbasis tanggal tetap berlaku walau kodenya tidak ada di portal
+                        if (handleMissing(c, tpl, missingByTemplate.getOrDefault(tplId, 0L))
+                                || expireIfDue(c, tpl)) {
+                            updated++;
+                        }
+                        continue;
+                    }
+                    if (c.getPortalMissingSince() != null) {
+                        generatedCouponRepository.clearPortalMissing(c.getId());
+                        log.info("Sync: code={} muncul lagi di skd_line portal, tanda hilang dihapus", c.getCouponCode());
+                    }
+                    if (applyPortalState(c, line, tpl)) {
                         updated++;
                     }
                 } catch (Exception e) {
@@ -91,41 +143,93 @@ public class GetCouponIsUsedService {
     private record PortalTemplate(String id, String sku, String name, Map<String, JsonNode> lineBySkd) {
     }
 
-    /** 3) ambil template + skd_line portal untuk satu sku. Null = portal kosong. */
-    private PortalTemplate fetchPortalTemplate(String sku) {
+    /**
+     * Template portal untuk satu sku, dikunci per id campaign. Melempar exception (→ SKU dilewati)
+     * bila respons tidak lengkap, supaya respons error/kosong tidak dibaca sebagai "semua kode hilang".
+     */
+    private Map<String, PortalTemplate> fetchPortalTemplates(String sku) {
         ObjectNode portalReq = JsonNodeFactory.instance.objectNode();
         portalReq.put("sku", sku);
-        ArrayNode result = postCouponListService.execute(portalReq);
+        ArrayNode result = postCouponListService.execute(portalReq);   // non-2xx / non-JSON sudah dilempar adaptor
         if (result == null || result.isEmpty()) {
-            log.warn("Sync is_used: portal tidak mengembalikan data untuk sku={}", sku);
-            return null;
+            throw new PortalResponseException("portal tidak mengembalikan template untuk sku=" + sku);
         }
-        JsonNode node = result.get(0);
-        Map<String, JsonNode> lineBySkd = new HashMap<>();
-        for (JsonNode line : node.path("skd_line")) {
-            String skd = textOrNull(line, "skd");
-            if (skd != null) lineBySkd.put(skd, line);
+
+        Map<String, PortalTemplate> byId = new HashMap<>();
+        for (JsonNode node : result) {
+            String portalSku = textOrNull(node, "sku");
+            if (!sku.equals(portalSku)) continue;                      // identitas SKU wajib cocok
+            String templateId = textOrNull(node, "id");                 // 259
+            if (templateId == null) {
+                throw new PortalResponseException("template sku=" + sku + " tanpa id");
+            }
+            JsonNode lines = node.path("skd_line");
+            if (!lines.isArray()) {
+                throw new PortalResponseException("template " + templateId + " tanpa skd_line");
+            }
+            if (lines.isEmpty()) {
+                // Kode yang sudah kita terbitkan pasti pernah ada di skd_line; daftar kosong total
+                // lebih mungkin respons tidak lengkap daripada semua kode dicabut.
+                throw new PortalResponseException("skd_line template " + templateId + " kosong");
+            }
+            // SEMUA baris harus valid: satu baris cacat berarti daftar tidak bisa dianggap lengkap,
+            // dan kode yang "hilang" belum tentu dicabut.
+            Map<String, JsonNode> lineBySkd = new HashMap<>();
+            int idx = 0;
+            for (JsonNode line : lines) {
+                String skd = line.isObject() ? textOrNull(line, "skd") : null;
+                if (skd == null || skd.isBlank()) {
+                    throw new PortalResponseException("skd_line[" + idx + "] template " + templateId + " tanpa skd");
+                }
+                if (lineBySkd.put(skd, line) != null) {
+                    throw new PortalResponseException("skd '" + skd + "' muncul ganda di template " + templateId);
+                }
+                idx++;
+            }
+            byId.put(templateId, new PortalTemplate(templateId, portalSku, textOrNull(node, "name"), lineBySkd));
         }
-        String templateId = textOrNull(node, "id");                 // 259
-        String portalSku = textOrDefault(node, "sku", sku);        // DCDWP00220
-        String name = textOrNull(node, "name");                    // Diskon 10% Injourney Besties
-        if (templateId == null) {
-            log.warn("Sync: template sku={} tanpa field id, couponId webhook kosong", sku);
+        if (byId.isEmpty()) {
+            throw new PortalResponseException("tidak ada template dengan sku=" + sku + " di respons portal");
         }
-        return new PortalTemplate(templateId, portalSku, name, lineBySkd);
+        return byId;
+    }
+
+    /**
+     * Kode tidak ada di skd_line portal. Ketidakhadiran BUKAN bukti pencabutan (respons bisa
+     * terpotong tanpa terdeteksi), jadi:
+     *  - selalu catat portal_missing_since (pertama kali hilang) untuk pemantauan;
+     *  - revoke hanya bila coupon.sync.revoke-on-missing.enabled=true, kode sudah hilang terus-menerus
+     *    selama confirm-after, dan jumlah kode hilang di template tidak melebihi batas.
+     *
+     * @return true bila status berubah
+     */
+    private boolean handleMissing(GeneratedCoupon c, PortalTemplate tpl, long missingInTemplate) {
+        if (c.getStatus() == CouponStatus.REVOKED) return false;
+        Instant now = Instant.now();
+        if (c.getPortalMissingSince() == null) {
+            generatedCouponRepository.markPortalMissing(c.getId(), now);
+            log.warn("Sync: code={} tidak ada di skd_line portal (sku={}), dicatat sebagai hilang{}",
+                    c.getCouponCode(), tpl.sku(), revokeOnMissing ? ", menunggu konfirmasi " + revokeConfirmAfter : "");
+            return false;
+        }
+        if (!revokeOnMissing) {
+            log.debug("Sync: code={} masih hilang sejak {} (revoke-on-missing nonaktif)",
+                    c.getCouponCode(), c.getPortalMissingSince());
+            return false;
+        }
+        if (missingInTemplate > maxRevokePerTemplate) return false;           // ditahan, lihat log error
+        if (c.getPortalMissingSince().plus(revokeConfirmAfter).isAfter(now)) return false;   // belum terkonfirmasi
+
+        boolean changed = webhookPublisher.markRevoked(c, tpl.id());
+        if (changed) {
+            log.warn("Sync: code={} hilang dari skd_line portal sejak {} (sku={}) -> REVOKED",
+                    c.getCouponCode(), c.getPortalMissingSince(), tpl.sku());
+        }
+        return changed;
     }
 
     /** @return true bila status kupon berubah (disimpan + event masuk antrean). */
     private boolean applyPortalState(GeneratedCoupon c, JsonNode line, PortalTemplate tpl) {
-
-        // Aturan 3: skd tidak ada lagi di skd_line portal -> REVOKED -> event coupon.revoked
-        if (line == null) {
-            if (c.getStatus() == CouponStatus.REVOKED) return false;   // sudah dikirim sebelumnya
-            c.setStatus(CouponStatus.REVOKED);
-            webhookPublisher.saveAndPublish(c, WebhookEventType.REVOKED, tpl.id(), null);
-            log.warn("Sync: code={} tidak ada di skd_line portal (sku={}) -> REVOKED", c.getCouponCode(), tpl.sku());
-            return true;
-        }
 
         // Aturan 1: sudah dipakai -> REDEEMED (menang atas expired) -> event coupon.redeemed
         if (line.path("is_used").asBoolean(false)) {
@@ -136,37 +240,39 @@ public class GetCouponIsUsedService {
             RedemptionDetail detail = redemptionDetailResolver.resolve(
                     receiptNumber, redeemDate, tpl.sku(), tpl.name());
 
-            c.setIsUsed(true);
-            c.setState(textOrDefault(line, "state", "used"));
-            c.setRedeemDate(redeemDate);
-            c.setStatus(CouponStatus.REDEEMED);
-            webhookPublisher.saveAndPublish(c, WebhookEventType.REDEEMED, tpl.id(), redeemDate, detail);
-
-            log.info("Sync: code={} -> REDEEMED (write_date={}, order={}, store={}, discount={})",
-                    c.getCouponCode(), textOrNull(line, "write_date"),
-                    detail.transactionId(), detail.storeId(), detail.discount());
-            return true;
+            boolean changed = webhookPublisher.markRedeemed(
+                    c, textOrDefault(line, "state", "used"), redeemDate, tpl.id(), detail);
+            if (changed) {
+                log.info("Sync: code={} -> REDEEMED (write_date={}, order={}, store={}, discount={})",
+                        c.getCouponCode(), textOrNull(line, "write_date"),
+                        detail.transactionId(), detail.storeId(), detail.discount());
+            }
+            return changed;
         }
 
         // Aturan 2: belum dipakai tapi tanggal lewat end -> EXPIRED -> event coupon.expired
-        if (isExpired(c)) {
-            if (c.getStatus() == CouponStatus.EXPIRED) return false;   // sudah dikirim sebelumnya
-            c.setStatus(CouponStatus.EXPIRED);
-            webhookPublisher.saveAndPublish(c, WebhookEventType.EXPIRED, tpl.id(),null);
-            log.info("Sync: code={} -> EXPIRED (endDate={})", c.getCouponCode(), c.getEndDate());
-            return true;
-        }
+        if (expireIfDue(c, tpl)) return true;
 
         // selain itu: masih ACTIVE, biarkan
         return false;
     }
 
+    /** ACTIVE yang sudah lewat end_date → EXPIRED. @return true bila status berubah */
+    private boolean expireIfDue(GeneratedCoupon c, PortalTemplate tpl) {
+        if (c.getStatus() != CouponStatus.ACTIVE || !isExpired(c)) return false;
+        boolean changed = webhookPublisher.markExpired(c, tpl.id());
+        if (changed) {
+            log.info("Sync: code={} -> EXPIRED (endDate={})", c.getCouponCode(), c.getEndDate());
+        }
+        return changed;
+    }
+
     private LocalDateTime parseRedeemDate(String value) {
-        if (value == null || value.isBlank()) return LocalDateTime.now(ZONE);
+        if (value == null || value.isBlank()) return time.now();
         try {
             return LocalDateTime.parse(value, SRC);   // "yyyy-MM-dd HH:mm:ss"
         } catch (Exception e) {
-            return LocalDateTime.now(ZONE);
+            return time.now();
         }
     }
 
@@ -184,6 +290,6 @@ public class GetCouponIsUsedService {
     }
 
     private boolean isExpired(GeneratedCoupon c) {
-        return c.getEndDate() != null && c.getEndDate().isBefore(LocalDateTime.now(ZONE));
+        return c.getEndDate() != null && c.getEndDate().isBefore(time.now());
     }
 }

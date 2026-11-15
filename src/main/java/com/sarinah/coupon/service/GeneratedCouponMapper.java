@@ -2,16 +2,17 @@ package com.sarinah.coupon.service;
 
 import com.sarinah.coupon.dto.GenerateCouponResponse;
 import com.sarinah.coupon.entity.GeneratedCoupon;
+import com.sarinah.coupon.util.PortalTime;
+import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
-import java.time.ZoneId;
-import java.time.format.DateTimeFormatter;
 
 @Component
+@RequiredArgsConstructor
 public class GeneratedCouponMapper {
 
-    private static final ZoneId JKT = ZoneId.of("Asia/Jakarta");
+    private final PortalTime time;
 
     public GenerateCouponResponse toResponse(GeneratedCoupon c) {
 
@@ -21,6 +22,7 @@ public class GeneratedCouponMapper {
                 c.getCouponName(),
                 c.getDiscPercentage(),
                 c.getScanType(),
+                c.getStatus(),
                 toIso(c.getStartDate()),
                 toIso(c.getEndDate()),
                 toIso(c.getRedeemDate()),
@@ -30,7 +32,6 @@ public class GeneratedCouponMapper {
     }
 
     private String toIso(LocalDateTime dt) {
-        return dt == null ? null
-                : dt.atZone(JKT).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
+        return time.toIsoOffset(dt);
     }
 }

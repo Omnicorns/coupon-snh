@@ -26,6 +26,12 @@ public class ApiKeyConfig {
 
     public static final String HEADER = "X-API-Key";
 
+    /**
+     * Request attribute berisi partner hasil autentikasi. Controller WAJIB memakai ini
+     * (bukan parameter dari client) untuk membatasi data kupon per partner.
+     */
+    public static final String PARTNER_ATTR = "coupon.partnerId";
+
     /** Parse "keyAAA:partner-a,keyBBB:partner-b" → map key→partner. */
     @Bean
     public Map<String, String> apiKeyMap(@Value("${coupon.security.api-keys:}") String raw) {
@@ -56,6 +62,7 @@ public class ApiKeyConfig {
                     return;
                 }
                 String partner = apiKeyMap.get(key);
+                req.setAttribute(PARTNER_ATTR, partner);
                 long start = System.currentTimeMillis();
                 try {
                     chain.doFilter(req, res);

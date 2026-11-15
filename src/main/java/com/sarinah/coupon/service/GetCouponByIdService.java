@@ -16,8 +16,9 @@ public class GetCouponByIdService {
     private final GeneratedCouponNewMapper transformer;
 
 
-    public List<GenerateCouponNewResponse> getCouponById(Long id) {
-        var coupon = generatedCouponRepository.findByCouponId(id)
+    /** Kupon terbit milik partner untuk campaign {@code id}; kupon partner lain tidak pernah ikut. */
+    public List<GenerateCouponNewResponse> getCouponById(String partnerId, Long id) {
+        var coupon = generatedCouponRepository.findByCouponIdAndPartnerId(id, partnerId)
                 .stream().map(transformer::toResponse).toList();
         if (coupon.isEmpty()){
             throw  new CouponNotFoundException(id);

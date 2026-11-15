@@ -54,27 +54,43 @@ public class GenerateIdempotencyService {
      * @throws IdempotencyKeyReusedException bila key dipakai dengan isi request berbeda
      */
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public Claim acquire(GenerateCouponRequest req) {
+    public Claim acquire(String partnerId, GenerateCouponRequest req) {
         String key = req.idempotencyKey();
-        String hash = fingerprint(req);
+        String hash = fingerprint(partnerId, req);
         Instant now = Instant.now();
         String token = UUID.randomUUID().toString();
 
-        if (repo.insertClaim(key, hash, token, now.plus(lease), now) == 1) {
+        if (repo.insertClaim(key, partnerId, hash, token, now.plus(lease), now) == 1) {
             return new Claim(token, null);
         }
 
         CouponGenerateRequest row = repo.findById(key)
                 .orElseThrow(() -> new ConflictException("Kupon sedang diterbitkan request lain, silakan ulangi"));
 
-        if (!row.getRequestHash().equals(hash)) {
+        // Key milik partner lain (atau baris lama yang partner-nya belum di-backfill) → tolak tanpa
+        // mengembalikan kupon apa pun.
+        if (!partnerId.equals(row.getPartnerId())) {
             throw new IdempotencyKeyReusedException(key);
+        }
+        if (!row.getRequestHash().equals(hash)) {
+            // Klaim dibuat sebelum partner masuk fingerprint. Partner sudah terverifikasi di atas,
+            // jadi cukup cocokkan isi request dengan format hash lama lalu tingkatkan hash-nya.
+            String legacyHash = legacyFingerprint(req);
+            if (!row.getRequestHash().equals(legacyHash)) {
+                throw new IdempotencyKeyReusedException(key);
+            }
+            // 0 baris = retry lain yang bersamaan sudah lebih dulu meningkatkan hash → tetap sah
+            if (repo.upgradeHash(key, partnerId, legacyHash, hash, now) != 1
+                    && !hash.equals(repo.currentHash(key))) {
+                throw new IdempotencyKeyReusedException(key);
+            }
+            log.info("Klaim lama key={} ditingkatkan ke fingerprint dengan partner", key);
         }
         if (row.getStatus() == GenerateRequestStatus.COMPLETED) {
             log.info("Idempotent hit key={}", key);
             return new Claim(null, row.getGeneratedCouponId());
         }
-        if (repo.takeOver(key, hash, token, now.plus(lease), now) == 1) {
+        if (repo.takeOver(key, partnerId, hash, token, now.plus(lease), now) == 1) {
             log.info("Ambil alih klaim key={} (status sebelumnya={})", key, row.getStatus());
             return new Claim(token, null);
         }
@@ -96,9 +112,21 @@ public class GenerateIdempotencyService {
         return repo.complete(key, token, couponId, Instant.now()) == 1;
     }
 
-    static String fingerprint(GenerateCouponRequest req) {
+    static String fingerprint(String partnerId, GenerateCouponRequest req) {
+        return sha256(partnerId + "\u001F" + requestContent(req));
+    }
+
+    /** Format sebelum partner masuk fingerprint (klaim yang dibuat sebelum isolasi partner). */
+    static String legacyFingerprint(GenerateCouponRequest req) {
+        return sha256(requestContent(req));
+    }
+
+    private static String requestContent(GenerateCouponRequest req) {
         String tag = (req.tag() == null || req.tag().isBlank()) ? "" : req.tag();
-        String raw = req.couponId() + "\u001F" + Objects.toString(req.transactionId(), "") + "\u001F" + tag;
+        return req.couponId() + "\u001F" + Objects.toString(req.transactionId(), "") + "\u001F" + tag;
+    }
+
+    private static String sha256(String raw) {
         try {
             byte[] d = MessageDigest.getInstance("SHA-256").digest(raw.getBytes(StandardCharsets.UTF_8));
             return HexFormat.of().formatHex(d);

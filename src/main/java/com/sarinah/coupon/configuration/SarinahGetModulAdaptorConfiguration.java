@@ -54,7 +54,8 @@ public class SarinahGetModulAdaptorConfiguration {
                                              MeterRegistry meterRegistry) throws Exception {
         return builder
                 .requestFactory(requestFactory(meterRegistry))
-                // portal sering mengembalikan status error untuk kasus normal → tangani manual di adaptor
+                // Jangan lempar dari RestClient: adaptor membaca status + body sendiri, lalu MENOLAK
+                // respons non-2xx (PortalResponseException) agar error portal tidak diproses sebagai data.
                 .defaultStatusHandler(status -> status.isError(), (req, res) -> { /* no-op */ })
                 .requestInterceptor(new RetryOnServerErrorInterceptor(1, 300))
                 .build();
