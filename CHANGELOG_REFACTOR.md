@@ -113,3 +113,51 @@ Saat kupon tidak ditemukan, `GetCouponByCouponCodeService` memanggil `Long.value
 untuk pesan error → `NumberFormatException` → HTTP 500 bila kode berisi huruf. Sekarang memakai
 konstruktor `CouponNotFoundException(String)` → HTTP 404 untuk semua bentuk kode, dan kode kosong
 → HTTP 400.
+
+---
+
+## Review keamanan & integritas (putaran 2)
+
+### Akses kupon dibatasi per partner (High)
+- Filter API key menyimpan partner ke request attribute `coupon.partnerId`; controller memakai
+  partner ini, bukan parameter dari client.
+- Kolom baru `generated_coupons.partner_id` dan `coupon_generate_requests.partner_id`.
+- `POST /generate` menyimpan partner pada kupon dan klaim idempotency. Key yang sama dari partner
+  lain → 422, tidak pernah mengembalikan kupon partner lain.
+- `GET /generated`, `GET /{id}`, `GET /code/{code}` hanya membaca kupon milik partner;
+  kupon partner lain → 404 / tidak muncul. `tag` hanya menyaring di dalam milik partner.
+- **Baris lama (`partner_id` null) tidak terlihat oleh partner mana pun** sampai di-backfill:
+  `UPDATE generated_coupons SET partner_id = '<partner>' WHERE partner_id IS NULL AND ...;`
+  (sesuaikan kriteria, mis. berdasarkan `tag` atau `transaction_id`). Lakukan hal yang sama
+  untuk `coupon_generate_requests` bila retry key lama masih diharapkan berhasil.
+
+### Generate memeriksa kelayakan campaign (High)
+- `CampaignEligibility`: `active = true`, `start_date <= sekarang < end_date`, dan hari ini ada di
+  `day_of_week_ids` (kosong = setiap hari). Nama hari Inggris/Indonesia dikenali; nama yang tidak
+  dikenali → ditolak (fail-closed). Tidak layak → 422, portal tidak dipanggil.
+- Template portal dipilih berdasarkan id DAN sku campaign (bukan elemen pertama); `active=false`
+  di portal juga ditolak.
+- Zona waktu tunggal lewat `PortalTime` (`sarinah-portal.timezone`, default `Asia/Jakarta`) dipakai
+  untuk semua perbandingan "sekarang" dan format ISO di response/webhook.
+
+### Respons error portal tidak lagi memicu pencabutan massal (High)
+- Adaptor menolak HTTP non-2xx, body kosong, non-JSON, dan object error (`PortalResponseException`,
+  di endpoint → 502). Object tunggal hanya diterima bila berbentuk data (punya `id`).
+- Sync is_used memvalidasi respons per SKU sebelum mengubah status: sku harus cocok, template harus
+  punya `id` dan `skd_line` array yang tidak kosong. Kupon hanya dicocokkan dengan template
+  campaign-nya sendiri (`couponId`). Respons tidak valid → SKU dilewati, tidak ada status yang berubah.
+
+### /generated hanya kupon yang benar-benar bisa dipakai (High)
+- Filter `status = ACTIVE`, `is_used = false`, dan dalam periode berlaku; response kini memuat `status`.
+
+### Transisi status aman antar-instance sync (Medium)
+- Status diubah dengan UPDATE bersyarat (bukan save entity yang dibaca sebelumnya):
+  `ACTIVE → REDEEMED|EXPIRED|REVOKED`, `EXPIRED → REDEEMED|REVOKED`, `REVOKED → REDEEMED`,
+  `REDEEMED` final. Bila instance lain sudah lebih dulu mengubah kupon, event tidak dibuat.
+
+### Webhook tidak hilang saat dinonaktifkan (Medium)
+- Event selalu masuk outbox; `prime.webhook.enabled=false` hanya menahan pengiriman di dispatcher.
+
+### Nominal diskon hanya bila terverifikasi (Medium)
+- Fallback "satu-satunya baris minus" dihapus; `discountApplied` hanya diisi bila baris cocok sku
+  atau nama kupon.
