@@ -3,16 +3,17 @@ package com.sarinah.coupon.service;
 import com.sarinah.coupon.dto.CouponResponse;
 import com.sarinah.coupon.dto.CouponResponse.*;
 import com.sarinah.coupon.entity.Coupon;
+import com.sarinah.coupon.util.PortalTime;
+import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
-import java.time.ZoneId;
-import java.time.format.DateTimeFormatter;
 
 @Component
+@RequiredArgsConstructor
 public class CouponTransformer {
 
-    private static final ZoneId JKT = ZoneId.of("Asia/Jakarta");
+    private final PortalTime time;
     private static final String MERCHANT = "Sarinah";
 
     public CouponResponse toResponse(Coupon c) {
@@ -37,8 +38,7 @@ public class CouponTransformer {
     }
 
     private String toIso(LocalDateTime dt) {
-        return dt == null ? null
-                : dt.atZone(JKT).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME);
+        return time.toIsoOffset(dt);
     }
 
     private String str(Number n) {

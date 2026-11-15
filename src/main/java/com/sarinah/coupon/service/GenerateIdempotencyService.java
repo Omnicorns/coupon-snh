@@ -54,27 +54,28 @@ public class GenerateIdempotencyService {
      * @throws IdempotencyKeyReusedException bila key dipakai dengan isi request berbeda
      */
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public Claim acquire(GenerateCouponRequest req) {
+    public Claim acquire(String partnerId, GenerateCouponRequest req) {
         String key = req.idempotencyKey();
-        String hash = fingerprint(req);
+        String hash = fingerprint(partnerId, req);
         Instant now = Instant.now();
         String token = UUID.randomUUID().toString();
 
-        if (repo.insertClaim(key, hash, token, now.plus(lease), now) == 1) {
+        if (repo.insertClaim(key, partnerId, hash, token, now.plus(lease), now) == 1) {
             return new Claim(token, null);
         }
 
         CouponGenerateRequest row = repo.findById(key)
                 .orElseThrow(() -> new ConflictException("Kupon sedang diterbitkan request lain, silakan ulangi"));
 
-        if (!row.getRequestHash().equals(hash)) {
+        // Key milik partner lain (atau baris lama tanpa partner) → tolak tanpa mengembalikan kupon apa pun.
+        if (!partnerId.equals(row.getPartnerId()) || !row.getRequestHash().equals(hash)) {
             throw new IdempotencyKeyReusedException(key);
         }
         if (row.getStatus() == GenerateRequestStatus.COMPLETED) {
             log.info("Idempotent hit key={}", key);
             return new Claim(null, row.getGeneratedCouponId());
         }
-        if (repo.takeOver(key, hash, token, now.plus(lease), now) == 1) {
+        if (repo.takeOver(key, partnerId, hash, token, now.plus(lease), now) == 1) {
             log.info("Ambil alih klaim key={} (status sebelumnya={})", key, row.getStatus());
             return new Claim(token, null);
         }
@@ -96,9 +97,9 @@ public class GenerateIdempotencyService {
         return repo.complete(key, token, couponId, Instant.now()) == 1;
     }
 
-    static String fingerprint(GenerateCouponRequest req) {
+    static String fingerprint(String partnerId, GenerateCouponRequest req) {
         String tag = (req.tag() == null || req.tag().isBlank()) ? "" : req.tag();
-        String raw = req.couponId() + "\u001F" + Objects.toString(req.transactionId(), "") + "\u001F" + tag;
+        String raw = partnerId + "\u001F" + req.couponId() + "\u001F" + Objects.toString(req.transactionId(), "") + "\u001F" + tag;
         try {
             byte[] d = MessageDigest.getInstance("SHA-256").digest(raw.getBytes(StandardCharsets.UTF_8));
             return HexFormat.of().formatHex(d);

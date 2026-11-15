@@ -25,6 +25,10 @@ public class CouponGenerateRequest {
     @Column(name = "idempotency_key", nullable = false, length = 255)
     private String idempotencyKey;
 
+    /** Partner pemilik klaim. Key yang sama dari partner lain ditolak (422), tidak pernah mengembalikan kupon. */
+    @Column(name = "partner_id", length = 100)
+    private String partnerId;
+
     /** SHA-256 dari isi request (couponId, transactionId, tag) — mendeteksi key dipakai ulang untuk request lain. */
     @Column(name = "request_hash", nullable = false, length = 64)
     private String requestHash;

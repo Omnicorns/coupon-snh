@@ -19,11 +19,12 @@ public interface CouponGenerateRequestRepository extends JpaRepository<CouponGen
     @Modifying
     @Query(value = """
             INSERT INTO coupon_generate_requests
-                (idempotency_key, request_hash, status, claim_token, locked_until, attempts, created_at, updated_at)
-            VALUES (:key, :hash, 'PROCESSING', :token, :lockedUntil, 1, :now, :now)
+                (idempotency_key, partner_id, request_hash, status, claim_token, locked_until, attempts, created_at, updated_at)
+            VALUES (:key, :partnerId, :hash, 'PROCESSING', :token, :lockedUntil, 1, :now, :now)
             ON CONFLICT (idempotency_key) DO NOTHING
             """, nativeQuery = true)
     int insertClaim(@Param("key") String key,
+                    @Param("partnerId") String partnerId,
                     @Param("hash") String hash,
                     @Param("token") String token,
                     @Param("lockedUntil") Instant lockedUntil,
@@ -39,10 +40,12 @@ public interface CouponGenerateRequestRepository extends JpaRepository<CouponGen
                SET status = 'PROCESSING', claim_token = :token, locked_until = :lockedUntil,
                    attempts = attempts + 1, last_error = NULL, updated_at = :now
              WHERE idempotency_key = :key
+               AND partner_id = :partnerId
                AND request_hash = :hash
                AND (status = 'FAILED' OR (status = 'PROCESSING' AND locked_until < :now))
             """, nativeQuery = true)
     int takeOver(@Param("key") String key,
+                 @Param("partnerId") String partnerId,
                  @Param("hash") String hash,
                  @Param("token") String token,
                  @Param("lockedUntil") Instant lockedUntil,
